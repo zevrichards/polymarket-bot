@@ -1,0 +1,23 @@
+{
+  "mode": "paper",
+  "starting_balance": 100.0,
+  "scan_interval_seconds": 60,
+  "directional_bot": {
+    "min_entry_price": 0.85,
+    "max_entry_price": 0.99,
+    "max_seconds_to_resolution": 120,
+    "min_seconds_to_resolution": 5,
+    "max_bet": 2.0,
+    "max_bankroll_fraction": 0.02
+  },
+  "oracle_bot": {
+    "max_divergence_pct": 0.15,
+    "chainlink_feed_address": "0xc907E116054Ad103354f2D350FD2514433D57F6f"
+  },
+  "market_maker_bot": {
+    "quote_size": 1.0,
+    "target_spread": 0.04,
+    "requote_threshold": 0.01,
+    "max_inventory": 10.0
+  }
+}

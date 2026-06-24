@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+logs/*.jsonl
+logs/*.sqlite
+logs/*.json
+learnings.md
+.venv/
+venv/
