@@ -18,6 +18,20 @@ positions.
 Inventory is long-only and capped at `max_inventory` shares per market --
 we never go short, since shorting a binary outcome token via this bot's
 simple quote model isn't well-defined.
+
+Correlated-event cap (added after a live run showed this bot had built up
+inventory across 18 different "Bitcoin above $X" strikes all resolving off
+the SAME underlying price observation -- the same risk pattern fixed in
+Bots 1/2 via has_open_position_for_event, just showing up here through
+accumulated quote inventory instead of one-shot buys). `max_inventory`
+alone only caps risk *per market*; it does nothing to stop the bot from
+quoting an entire strike ladder and ending up with significant aggregate
+exposure to one BTC price at one timestamp. `max_inventory_per_event` caps
+total inventory across all markets sharing a resolution timestamp: new
+quotes aren't created once the event is already at cap, and further BUY
+fills (which increase inventory) are refused past the cap -- SELL fills
+(which reduce inventory) are never blocked, since exiting risk is always
+fine.
 """
 from __future__ import annotations
 
@@ -46,6 +60,7 @@ class Quote:
     cash: float = 0.0  # net cash flow from fills on this market (negative = spent)
     market_id: str | None = None  # needed to check resolution; None on old/pre-upgrade state
     outcome: str | None = None
+    event_key: str | None = None  # market.end_date.isoformat() -- shared by correlated strikes
 
 
 @dataclass
@@ -84,9 +99,30 @@ def best_bid_ask(book) -> tuple[float | None, float | None]:
     return best_bid, best_ask
 
 
-def check_fills(token_id: str, quote: Quote, best_bid: float, best_ask: float, cfg: dict) -> dict | None:
+def event_inventory(state: "MMState", event_key: str | None, exclude_token_id: str | None = None) -> float:
+    """Total inventory currently held across all markets sharing this
+    resolution event (e.g. a strike ladder all settling off one BTC price
+    observation at one timestamp)."""
+    if not event_key:
+        return 0.0
+    return sum(
+        q.inventory
+        for tid, q in state.quotes.items()
+        if q.event_key == event_key and tid != exclude_token_id
+    )
+
+
+def check_fills(
+    token_id: str,
+    quote: Quote,
+    best_bid: float,
+    best_ask: float,
+    cfg: dict,
+    event_inventory_before_this_quote: float = 0.0,
+) -> dict | None:
     """If the live book crossed our resting quote, simulate the fill."""
     quote_size = cfg["quote_size"]
+    max_per_event = cfg.get("max_inventory_per_event", float("inf"))
 
     # Our ask gets hit if someone is willing to sell into the book at/below our ask
     # (i.e. the live best bid is >= our ask -- we'd be the best available buyer... )
@@ -94,6 +130,7 @@ def check_fills(token_id: str, quote: Quote, best_bid: float, best_ask: float, c
     # reaches our ask price (someone sells to us is the wrong direction for an
     # ask -- here we simulate the simpler, conservative case: our resting ask is
     # filled when the market's best bid price meets or exceeds it).
+    # SELL fills (reducing inventory) are never blocked by the event cap.
     if quote.inventory > 0 and best_bid >= quote.ask_price:
         size = min(quote_size, quote.inventory)
         quote.inventory -= size
@@ -101,7 +138,11 @@ def check_fills(token_id: str, quote: Quote, best_bid: float, best_ask: float, c
         return {"side": "ask_filled", "price": quote.ask_price, "size": size}
 
     # Our bid gets hit when the market's best ask price meets or undercuts it.
+    # BUY fills (increasing inventory) ARE blocked once the event-level cap
+    # is reached -- this is the correlated-risk guard.
     if best_ask <= quote.bid_price:
+        if event_inventory_before_this_quote + quote.inventory >= max_per_event:
+            return None
         size = quote_size
         quote.inventory += size
         quote.cash -= size * quote.bid_price
@@ -122,6 +163,7 @@ def make_quote(
     cash: float = 0.0,
     market_id: str | None = None,
     outcome: str | None = None,
+    event_key: str | None = None,
 ) -> Quote:
     half_spread = cfg["target_spread"] / 2
     return Quote(
@@ -131,6 +173,7 @@ def make_quote(
         cash=cash,
         market_id=market_id,
         outcome=outcome,
+        event_key=event_key,
     )
 
 
@@ -210,14 +253,24 @@ def run_once(cfg: dict | None = None, state: MMState | None = None) -> list[dict
                 continue
             mid = (best_bid + best_ask) / 2
 
+            event_key = market.end_date.isoformat()
+            max_per_event = bot_cfg.get("max_inventory_per_event", float("inf"))
+
             quote = state.quotes.get(token_id)
             if quote is None:
-                quote = make_quote(mid, bot_cfg, market_id=market.market_id, outcome=outcome)
+                if event_inventory(state, event_key) >= max_per_event:
+                    log.info(
+                        "%s/%s: skipping new quote -- event %s already at inventory cap",
+                        market.slug, outcome, event_key,
+                    )
+                    continue
+                quote = make_quote(mid, bot_cfg, market_id=market.market_id, outcome=outcome, event_key=event_key)
                 state.quotes[token_id] = quote
                 log.info("%s/%s: new quote bid=%.2f ask=%.2f", market.slug, outcome, quote.bid_price, quote.ask_price)
                 continue
 
-            fill = check_fills(token_id, quote, best_bid, best_ask, bot_cfg)
+            inventory_elsewhere = event_inventory(state, event_key, exclude_token_id=token_id)
+            fill = check_fills(token_id, quote, best_bid, best_ask, bot_cfg, inventory_elsewhere)
             if fill:
                 record = journal.log_trade(
                     BOT_NAME,
@@ -236,6 +289,7 @@ def run_once(cfg: dict | None = None, state: MMState | None = None) -> list[dict
                     mid, bot_cfg,
                     inventory=quote.inventory, cash=quote.cash,
                     market_id=quote.market_id or market.market_id, outcome=quote.outcome or outcome,
+                    event_key=quote.event_key or event_key,
                 )
                 state.quotes[token_id] = new_quote
                 log.info(

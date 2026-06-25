@@ -2,10 +2,10 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-logs/*.jsonl
-logs/*.sqlite
-logs/*.json
-logs/*.log
+logs/**/*.jsonl
+logs/**/*.sqlite
+logs/**/*.json
+logs/**/*.log
 learnings.md
 .venv/
 venv/

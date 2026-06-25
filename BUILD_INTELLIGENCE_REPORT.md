@@ -170,3 +170,19 @@
 
 ### Known limitation observed, not a bug
 - Pre-existing open positions from before this session's fix don't have `event_key` set (defaults to `""`), so they won't retroactively block a third correlated strike from slipping through until they resolve and clear out. This is an acceptable one-time gap for already-open state, not a flaw in the fix itself -- new positions opened after this fix are always tagged correctly.
+
+---
+
+## SESSION 6 — The Session 4/5 correlation fix was bot-specific; market_maker_bot still had it (2026-06-25)
+
+**What happened:** Did a clean reset (archived all pre-fix trades/state, fresh $100 balance) specifically to verify Sessions 4-5's fixes in isolation. After 30 minutes: directional_bot/oracle_bot correctly had zero entries (their fixes held -- the rare entry condition just hadn't fired, not a bug). But `market_maker_bot` had quietly built up inventory across **18 different "Bitcoin above $X" strikes, all resolving at the same 12pm ET timestamp** -- the exact same correlated-event risk pattern, just never patched in this bot.
+
+### Critical bugs & fixes (this session)
+- **Problem:** `market_maker_bot` had no concept of correlated resolution events at all. It intentionally quotes both sides of every market it finds (that's the strategy), so when `fetch_btc_markets()` returns a full strike ladder, it happily quotes -- and accumulates inventory in -- all of them, with `max_inventory` only capping risk *per market*, never in aggregate across markets that are secretly the same underlying bet.
+  - **Root Cause:** Sessions 4-5's correlation fixes were written and reasoned about entirely in terms of `directional_bot`/`oracle_bot`'s one-shot-buy model (`has_open_position_for_market`/`has_open_position_for_event` on `PaperBroker`). Nobody re-asked "does this same risk pattern exist in the third bot, which has a structurally different state model (continuous quoting/inventory vs. one-shot buys)?" until live data showed it directly.
+  - **Fix:** Added `Quote.event_key`, `event_inventory(state, event_key)` (sums inventory across all quotes sharing a resolution timestamp), and a `max_inventory_per_event` cap (config, default 10.0, same as per-market `max_inventory`) enforced two ways: (1) refuse to create a *new* quote on a market if its event is already at the inventory cap, (2) refuse *buy* fills (which increase inventory) once the event cap is hit, while *sell* fills (which reduce inventory) are never blocked -- exiting risk should always be allowed. **MANDATORY: a portfolio-construction fix found in one bot must be explicitly re-evaluated against every other bot in the same repo with its own state model, not assumed to generalize. "We fixed the correlation bug" was true for 2 of 3 bots and false for the third until checked directly.**
+  - **Tokens wasted:** medium -- found by deliberately auditing "why hasn't anything resolved yet" rather than just reading the top-line PnL number, which would have looked fine (0 resolved, $0 PnL) right up until the correlated ladder actually settled.
+
+### What this means going forward
+- The already-accumulated 18-strike inventory (built before this fix) could not be retroactively capped -- it rides to its 12pm ET resolution as-is, which is itself informative data about how that specific correlated exposure plays out. The fix only prevents *new* correlated buildups from this point on.
+- **Process lesson:** whenever a "stop and rethink if the same error recurs" checkpoint is set, the check has to span every bot doing related work, not just the one(s) where the bug was first found. The user caught this by asking why a number was suspiciously flat (zero resolutions after 30 min) rather than trusting an all-green-looking report.

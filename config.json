@@ -19,6 +19,7 @@
     "quote_size": 1.0,
     "target_spread": 0.04,
     "requote_threshold": 0.01,
-    "max_inventory": 10.0
+    "max_inventory": 10.0,
+    "max_inventory_per_event": 10.0
   }
 }
