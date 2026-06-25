@@ -87,9 +87,10 @@ order-book depth to fill a trade -- if a position is still unresolved after
   },
   "market_maker_bot": {
     "quote_size": 1.0,
-    "target_spread": 0.04,
-    "requote_threshold": 0.01,
-    "max_inventory": 10.0
+    "target_spread": 0.10,           // widened from 0.04 after adverse selection ate the original spread
+    "requote_threshold": 0.02,
+    "max_inventory": 10.0,
+    "max_inventory_per_event": 10.0  // caps aggregate inventory across markets sharing a resolution timestamp
   }
 }
 ```

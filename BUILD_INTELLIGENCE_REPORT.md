@@ -186,3 +186,20 @@
 ### What this means going forward
 - The already-accumulated 18-strike inventory (built before this fix) could not be retroactively capped -- it rides to its 12pm ET resolution as-is, which is itself informative data about how that specific correlated exposure plays out. The fix only prevents *new* correlated buildups from this point on.
 - **Process lesson:** whenever a "stop and rethink if the same error recurs" checkpoint is set, the check has to span every bot doing related work, not just the one(s) where the bug was first found. The user caught this by asking why a number was suspiciously flat (zero resolutions after 30 min) rather than trusting an all-green-looking report.
+
+---
+
+## SESSION 7 — Restarting a patched bot without resetting its own state re-contaminates the report; market maker has an adverse-selection problem, not a bug (2026-06-25)
+
+### Critical process mistake (not a code bug)
+- **Problem:** After patching `market_maker_bot` with the event cap (Session 6), I relaunched it but only restarted the *process* -- I didn't wipe `mm_state.json`/`trades.jsonl` the way I had for `directional_bot`/`oracle_bot` earlier in the same session. ~17 shares of pre-fix correlated inventory (bought before the fix went live) stayed in the state file and would have mixed into the next report, making it look like the fix might be failing when it wasn't.
+  - **Root Cause:** Treated "patch one bot, restart that bot" as sufficient, without re-applying the same "reset for a clean baseline" discipline used earlier for the other two bots in the same session.
+  - **Fix:** No code fix needed -- this is a procedure, not a bug. Confirmed via trade timestamps that the leftover inventory predated the fix going live, then did a full archive-and-reset across all three bots' state/logs.
+  - **MANDATORY PROCESS RULE: whenever a bot's trading logic is patched mid-session, its state/logs must be reset before the next evaluation, every time, not just the first time.** The user caught this by asking directly "did we reset the logs and wallets" rather than assuming a restart implied a reset.
+
+### Real finding: market maker's losses are adverse selection, confirmed via a clean 92-trade sample
+- **Problem:** After a genuinely clean reset, `market_maker_bot` still lost money (-$13.64 over 92 resolved positions) despite a perfectly neutral 46W/46L split -- impossible to explain as "bad luck" at that sample size.
+  - **Diagnosis:** `avg inventory settled on wins = 0.00` vs `avg inventory settled on losses = 0.65`, and even nominal "wins" had slightly negative PnL (-0.047 avg). This is the textbook signature of adverse selection: resting two-sided quotes get picked off by faster/informed flow specifically as the true outcome becomes predictable near resolution, so the bot ends up holding real inventory on losers while only ever capturing tiny, low/negative-margin scraps on winners.
+  - **Root cause, not a bug:** `MIN_SECONDS_TO_RESOLUTION = 30` let the bot keep quoting into the highest-risk window (last 30s before resolution, when price is converging and easiest to predict). `target_spread = 0.04` (2c half-spread) wasn't enough compensation for that risk.
+  - **Fix (parameter tuning, unverified yet):** `MIN_SECONDS_TO_RESOLUTION` 30 -> 120, `target_spread` 0.04 -> 0.10, `requote_threshold` 0.01 -> 0.02 (less constant re-centering/chasing). **This has NOT been validated against live results yet -- it's a hypothesis-driven change based on the adverse-selection diagnosis, not a confirmed fix.** Next report should specifically check whether the win/loss PnL asymmetry shrinks, not just whether total PnL improves (total PnL improving for unrelated reasons would be a false signal).
+  - **Lesson for future strategy bots:** a numerically neutral win rate (46W/46L) does NOT mean a neutral-risk strategy -- always check whether wins and losses are systematically different in *size*, not just count, before concluding "no edge either way."

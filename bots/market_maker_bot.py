@@ -46,7 +46,10 @@ from core import clob_client, journal, markets as markets_module, resolution
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 MM_STATE_PATH = Path(__file__).resolve().parent.parent / "logs" / "mm_state.json"
 BOT_NAME = "market_maker_bot"
-MIN_SECONDS_TO_RESOLUTION = 30  # don't quote into the last few seconds, too risky to requote in time
+MIN_SECONDS_TO_RESOLUTION = 120  # stop quoting well before resolution -- a 92-trade live sample
+# showed avg inventory settled on wins = 0.00 vs 0.65 on losses, the signature of adverse selection:
+# resting quotes get picked off by informed/faster flow specifically as price converges toward the
+# true outcome near resolution. 30s wasn't enough margin; widened to 120s (see BUILD_INTELLIGENCE_REPORT.md).
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(BOT_NAME)
