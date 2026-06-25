@@ -5,15 +5,29 @@ trading and market discovery -- Polymarket's CLOB allows unauthenticated
 reads of order books, prices, and markets. Authenticated access (placing
 real orders) is intentionally not wired up yet; see README for the deferred
 live-trading phase.
+
+py-clob-client's HTTP layer sets NO timeout on its requests (confirmed by
+inspecting its source -- no "timeout" anywhere in http_helpers/). That means
+a slow/degraded Polymarket endpoint can hang a call indefinitely, which
+defeats core/scheduler.py's retry-on-failure design entirely: a hang never
+raises an exception to be caught, it just stalls the process forever. Since
+we can't pass a timeout into the library's calls directly, we set a
+process-wide socket default here -- any socket opened anywhere in this
+process (including inside py-clob-client) that doesn't specify its own
+timeout falls back to this one.
 """
 from __future__ import annotations
 
+import socket
 from functools import lru_cache
 
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import BookParams
 
 CLOB_HOST = "https://clob.polymarket.com"
+DEFAULT_SOCKET_TIMEOUT_SECONDS = 15
+
+socket.setdefaulttimeout(DEFAULT_SOCKET_TIMEOUT_SECONDS)
 
 
 @lru_cache(maxsize=1)
