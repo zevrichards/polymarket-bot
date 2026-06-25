@@ -5,6 +5,7 @@ __pycache__/
 logs/*.jsonl
 logs/*.sqlite
 logs/*.json
+logs/*.log
 learnings.md
 .venv/
 venv/

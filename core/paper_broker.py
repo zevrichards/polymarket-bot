@@ -74,6 +74,14 @@ class PaperBroker:
     def balance(self) -> float:
         return self.state.balance
 
+    def has_open_position_for_market(self, market_id: str) -> bool:
+        """True if we already hold a position in either outcome of this
+        market. Checking this before entering prevents two real bugs seen
+        in testing: pyramiding into the same token every scan, and buying
+        both outcomes of the same binary market (a guaranteed loss on the
+        combination once both legs' prices sum to more than $1)."""
+        return any(p.market_id == market_id for p in self.state.positions.values())
+
     def buy(
         self,
         market_id: str,

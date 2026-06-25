@@ -119,3 +119,30 @@
 - **Tokens wasted:** high across two sessions — a full "known limitation" narrative was built, written into two docs, and reported to the user as fact, all from one bad example.
 
 **Mandatory lesson for future builds: when an API appears to behave inconsistently for a specific entity (a market, a user, a token), check that entity's own metadata (volume, status, age, flags) for an explanation before concluding the API itself is broken for that category.** A single zero-volume/zero-liquidity outlier is not evidence of a systemic gap. When a user says "are you sure?" or cites their own research that contradicts a conclusion you reported, that is a strong signal to redo the test with a better sample, not to defend the original finding.
+
+---
+
+## SESSION 4 — First overnight paper-trading run exposes real portfolio bugs (2026-06-24/25)
+
+**What happened:** Ran all three bots unattended for ~8 hours with $100 paper balance (fix from Session 3 confirmed working -- resolution tracking populated correctly all night). Result: directional_bot and oracle_bot both lost money (-$24.23 / -$24.22 on a $100 bankroll) at a 41.7% win rate (5W/7L) despite only entering trades priced $0.85-$0.99 -- a win rate that low at those prices is not "the strategy has weak edge," it's "something is structurally broken," because breakeven at ~$0.90 entry requires roughly 90% wins.
+
+### Critical bugs & fixes (this session)
+- **Problem:** All 7 losses traced back to ONE event: 7 separate "Bitcoin above $X on [same timestamp]" markets (a ladder of strike prices, e.g. $59,000/$59,200/.../$60,800) all entered simultaneously with "No" bets. BTC rallied through every strike by the resolution time, and all 7 lost together.
+  - **Root Cause:** These aren't independent markets -- they all resolve off ONE underlying BTC price observation at one timestamp. The bot's `find_candidates`/`run_once` loop treated each Gamma market as an independent opportunity with its own `max_bankroll_fraction` slice, with no concept of "these 7 markets are the same bet." Effective result: 7 x 2% = 14% of bankroll on a single coin flip, dressed up as 7 diversified small bets.
+  - **Fix:** Added `select_candidates()` to `bots/directional_bot.py` -- groups same-scan candidates by `market.end_date` (the shared resolution timestamp) and keeps only the single highest-confidence candidate per group (`max_correlated_markets_per_event` config field, default 1). **MANDATORY for any future entry-selection logic: before treating two opportunities as independent, check whether they share an underlying resolution event/timestamp/condition. Polymarket routinely lists what looks like N separate markets that are actually 1 underlying risk factor sliced into strikes.**
+  - **Tokens wasted:** high -- this required pulling the full overnight `trades.jsonl`, reconstructing the timeline, and grouping by market_id/slug/timestamp by hand to find the pattern. Future sessions analyzing a paper-trading run should immediately group entries by `end_date`/resolution timestamp as a first step, not just compute an aggregate win rate.
+
+- **Problem:** Within that same disaster cluster, one specific market (`bitcoin-above-60800...`) had BOTH "Yes" and "No" bought (`[('No', 0.97), ('Yes', 0.97), ('No', 0.99)]`) -- a guaranteed loss on the combination, since $0.97 + $0.99 = $1.96 paid for a position that can only ever pay out $1.00.
+  - **Root Cause:** Near resolution, with thin order-book depth, BOTH outcomes' best-ask can independently spike toward $0.99 (no one left providing liquidity on either side) -- the entry rule reads "ask price is high" as "market is confident in this outcome," but here it actually means "the book is empty," which says nothing about which side will actually win. Nothing in `find_candidates`/`run_once` checked whether we already held a position (in either outcome) of the same market before adding another.
+  - **Fix:** Added `PaperBroker.has_open_position_for_market(market_id)` -- checked before considering a market's candidates at all. This also fixes a second bug found in the same data: the bot was re-entering (pyramiding into) the same market on consecutive 60s scans, since nothing previously stopped a second `buy()` call on a market it already held.
+  - **Tokens wasted:** medium -- found as a side effect of investigating the strike-ladder bug, not independently.
+
+### What this means for the strategy itself (not just the bugs)
+- Excluding the one correlated-cluster disaster, the remaining 4 trades were all independent, single-strike, isolated bets -- and all 4 won. Too small a sample to claim the $0.85-$0.99 entry signal has real edge, but it means the overnight loss was **not** primarily evidence the strategy itself is bad -- it was three concrete implementation bugs compounding into one oversized, self-inflicted blow-up. **Don't conflate "the bot lost money" with "the strategy doesn't work" until portfolio-construction bugs (correlation, double-entry, pyramiding) are ruled out first.**
+
+### Loss prevention features (this session, additive to prior sessions' lists)
+- **Never hold two positions in the same market.** `has_open_position_for_market()` is now checked before any new entry is considered, full stop. **NON-NEGOTIABLE** -- this is true for any future bot touching markets with mutually exclusive binary outcomes.
+- **Correlated-event concentration cap.** `select_candidates()` with `max_correlated_markets_per_event` (default 1) is now mandatory before sizing any trade across multiple simultaneously-scanned candidates. **NON-NEGOTIABLE** for any strategy that scans multiple markets per cycle -- always check for shared resolution timestamps/conditions before treating candidates as independent.
+
+### Config & environment (this session)
+- Added `directional_bot.max_correlated_markets_per_event = 1` to `config.json` (shared by oracle_bot, which reuses the `directional_bot` config block). Not yet tuned/tested against a second overnight run.

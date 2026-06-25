@@ -5,12 +5,28 @@ $0.85-$0.99 band with a short window left before resolution -- the classic
 "buy the near-certain side cheaply, let it settle to $1" trade described in
 the source article. Paper-trading only; see README for what's deferred
 before this can run live.
+
+Two guards added after an overnight paper-trading run exposed real bugs
+(see BUILD_INTELLIGENCE_REPORT.md Session 4):
+
+1. Never enter a market we already hold a position in. Without this, the
+   bot re-bought into the same market on consecutive scans (pyramiding),
+   and in one case bought BOTH outcomes of the same market -- a guaranteed
+   loss on the combination once both legs' prices sum to over $1.
+2. Cap how many candidates resolving at the *same exact timestamp* get
+   traded per scan. Polymarket lists separate "Bitcoin above $X" markets
+   per strike price, all resolving off one underlying price observation --
+   they're not independent bets. Without this cap, the bot took 7
+   simultaneous "No" positions across a strike ladder, all correlated to
+   one BTC move, and lost all 7 together when price rallied through every
+   strike -- effectively one 7x-oversized bet disguised as 7 small ones.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+from collections import defaultdict
 from pathlib import Path
 
 from core import clob_client, journal, markets, resolution
@@ -57,6 +73,31 @@ def size_position(broker: PaperBroker, cfg: dict) -> float:
     return min(cfg["max_bet"], broker.balance * cfg["max_bankroll_fraction"])
 
 
+def select_candidates(
+    market_candidates: list[tuple], max_per_event: int
+) -> list[tuple]:
+    """Given [(market, candidate), ...], cap how many get traded per
+    distinct resolution timestamp -- markets sharing an endDate (e.g. a
+    ladder of strike prices all settling off one BTC price observation)
+    are correlated, not independent, so only the single most-confident
+    candidate per timestamp is kept by default (max_per_event=1)."""
+    by_event = defaultdict(list)
+    for market, candidate in market_candidates:
+        by_event[market.end_date].append((market, candidate))
+
+    selected = []
+    for end_date, group in by_event.items():
+        group.sort(key=lambda mc: mc[1]["ask_price"], reverse=True)
+        selected.extend(group[:max_per_event])
+        for market, candidate in group[max_per_event:]:
+            log.info(
+                "skipping %s/%s -- correlated with %d other candidate(s) resolving at %s, "
+                "only taking the top %d per event",
+                market.slug, candidate["outcome"], len(group) - 1, end_date, max_per_event,
+            )
+    return selected
+
+
 def run_once(cfg: dict | None = None, broker: PaperBroker | None = None) -> list[dict]:
     cfg = cfg or load_config()
     bot_cfg = cfg["directional_bot"]
@@ -71,48 +112,55 @@ def run_once(cfg: dict | None = None, broker: PaperBroker | None = None) -> list
     if resolved:
         log.info("settled %d resolved position(s)", len(resolved))
 
-    fills = []
-
     btc_markets = markets.fetch_btc_markets()
     log.info("scanned %d BTC markets", len(btc_markets))
 
+    market_candidates = []
     for market in btc_markets:
-        candidates = find_candidates(market, bot_cfg)
-        for candidate in candidates:
-            usd_amount = size_position(broker, bot_cfg)
-            if usd_amount <= 0:
-                log.info("skipping %s: no bankroll available", market.slug)
-                continue
-            try:
-                fill = broker.buy(
-                    market_id=market.market_id,
-                    token_id=candidate["token_id"],
-                    outcome=candidate["outcome"],
-                    usd_amount=usd_amount,
-                    order_book=candidate["book"],
-                )
-            except (InsufficientLiquidity, InsufficientBalance) as exc:
-                log.info("skipped %s/%s: %s", market.slug, candidate["outcome"], exc)
-                continue
+        if broker.has_open_position_for_market(market.market_id):
+            continue  # already holding a position here -- don't add to or flip it
+        for candidate in find_candidates(market, bot_cfg):
+            market_candidates.append((market, candidate))
 
-            record = journal.log_trade(
-                BOT_NAME,
-                kind="entry",
-                market_slug=market.slug,
-                question=market.question,
-                entry_price=candidate["ask_price"],
-                seconds_to_resolution=market.seconds_to_resolution(),
-                **fill,
+    max_per_event = bot_cfg.get("max_correlated_markets_per_event", 1)
+    selected = select_candidates(market_candidates, max_per_event)
+
+    fills = []
+    for market, candidate in selected:
+        usd_amount = size_position(broker, bot_cfg)
+        if usd_amount <= 0:
+            log.info("skipping %s: no bankroll available", market.slug)
+            continue
+        try:
+            fill = broker.buy(
+                market_id=market.market_id,
+                token_id=candidate["token_id"],
+                outcome=candidate["outcome"],
+                usd_amount=usd_amount,
+                order_book=candidate["book"],
             )
-            log.info(
-                "BUY %s %s @ %.3f ($%.2f) | %s",
-                market.slug,
-                candidate["outcome"],
-                fill["avg_price"],
-                fill["cost"],
-                market.question,
-            )
-            fills.append(record)
+        except (InsufficientLiquidity, InsufficientBalance) as exc:
+            log.info("skipped %s/%s: %s", market.slug, candidate["outcome"], exc)
+            continue
+
+        record = journal.log_trade(
+            BOT_NAME,
+            kind="entry",
+            market_slug=market.slug,
+            question=market.question,
+            entry_price=candidate["ask_price"],
+            seconds_to_resolution=market.seconds_to_resolution(),
+            **fill,
+        )
+        log.info(
+            "BUY %s %s @ %.3f ($%.2f) | %s",
+            market.slug,
+            candidate["outcome"],
+            fill["avg_price"],
+            fill["cost"],
+            market.question,
+        )
+        fills.append(record)
 
     if not fills:
         log.info("no candidates found this scan")

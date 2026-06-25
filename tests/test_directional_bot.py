@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 from core import clob_client
 from core.markets import BtcMarket
-from bots.directional_bot import find_candidates, size_position
+from core.paper_broker import PaperBroker
+from bots.directional_bot import find_candidates, select_candidates, size_position
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "sample_orderbook.json"
 
@@ -83,3 +84,54 @@ def test_size_position_respects_max_bet_and_bankroll_fraction():
     broker = SimpleNamespace(balance=50.0)
     # 2% of 50 = 1.0, below max_bet, so bankroll fraction wins
     assert size_position(broker, BOT_CFG) == 1.0
+
+
+def test_has_open_position_for_market_blocks_reentry(tmp_path):
+    # Regression test for the overnight pyramiding bug: once a position
+    # exists for a market, the bot must not be able to add to it or buy
+    # the opposite outcome.
+    broker = PaperBroker(starting_balance=100.0, state_path=tmp_path / "state.json")
+    assert broker.has_open_position_for_market("m1") is False
+
+    broker.buy("m1", "t-up", "Up", 2.0, fake_book([0.90]))
+
+    assert broker.has_open_position_for_market("m1") is True
+    assert broker.has_open_position_for_market("m2") is False
+
+
+def test_select_candidates_caps_correlated_markets_per_event():
+    # Regression test for the overnight strike-ladder bug: 7 markets all
+    # resolving at the same timestamp must collapse to 1 trade, not 7.
+    same_time = make_market(seconds_left=60).end_date
+    markets_ = [
+        BtcMarket(
+            market_id=f"m{i}", question="q", slug=f"s{i}", end_date=same_time,
+            outcomes=["Up", "Down"], token_ids=[f"t{i}-up", f"t{i}-down"],
+            active=True, closed=False,
+        )
+        for i in range(7)
+    ]
+    # Each market has one candidate, with increasing confidence (ask_price)
+    market_candidates = [
+        (m, {"token_id": f"t{i}-up", "outcome": "Up", "ask_price": 0.85 + i * 0.01, "book": None})
+        for i, m in enumerate(markets_)
+    ]
+
+    selected = select_candidates(market_candidates, max_per_event=1)
+
+    assert len(selected) == 1
+    # the highest-confidence candidate (last one, ask_price=0.91) should win
+    assert selected[0][1]["ask_price"] == 0.85 + 6 * 0.01
+
+
+def test_select_candidates_allows_uncorrelated_markets_through():
+    market_a = make_market(seconds_left=60)
+    market_b = make_market(seconds_left=120)  # different end_date
+    market_candidates = [
+        (market_a, {"token_id": "ta", "outcome": "Up", "ask_price": 0.90, "book": None}),
+        (market_b, {"token_id": "tb", "outcome": "Up", "ask_price": 0.90, "book": None}),
+    ]
+
+    selected = select_candidates(market_candidates, max_per_event=1)
+
+    assert len(selected) == 2

@@ -25,7 +25,7 @@ import json
 import logging
 from pathlib import Path
 
-from bots.directional_bot import find_candidates, size_position
+from bots.directional_bot import find_candidates, select_candidates, size_position
 from core import chainlink, journal, resolution
 from core import markets as markets_module
 from core.paper_broker import InsufficientBalance, InsufficientLiquidity, PaperBroker
@@ -106,48 +106,55 @@ def run_once(cfg: dict | None = None, broker: PaperBroker | None = None) -> list
         journal.append_learning(BOT_NAME, f"Scan skipped -- oracle guard blocked: {reason}")
         return []
 
-    fills = []
-
     btc_markets = markets_module.fetch_btc_markets()
     log.info("scanned %d BTC markets", len(btc_markets))
 
+    market_candidates = []
     for market in btc_markets:
-        candidates = find_candidates(market, bot_cfg)
-        for candidate in candidates:
-            usd_amount = size_position(broker, bot_cfg)
-            if usd_amount <= 0:
-                continue
-            try:
-                fill = broker.buy(
-                    market_id=market.market_id,
-                    token_id=candidate["token_id"],
-                    outcome=candidate["outcome"],
-                    usd_amount=usd_amount,
-                    order_book=candidate["book"],
-                )
-            except (InsufficientLiquidity, InsufficientBalance) as exc:
-                log.info("skipped %s/%s: %s", market.slug, candidate["outcome"], exc)
-                continue
+        if broker.has_open_position_for_market(market.market_id):
+            continue  # already holding a position here -- don't add to or flip it
+        for candidate in find_candidates(market, bot_cfg):
+            market_candidates.append((market, candidate))
 
-            record = journal.log_trade(
-                BOT_NAME,
-                kind="entry",
-                market_slug=market.slug,
-                question=market.question,
-                entry_price=candidate["ask_price"],
-                seconds_to_resolution=market.seconds_to_resolution(),
-                oracle_guard_reason=reason,
-                **fill,
+    max_per_event = bot_cfg.get("max_correlated_markets_per_event", 1)
+    selected = select_candidates(market_candidates, max_per_event)
+
+    fills = []
+    for market, candidate in selected:
+        usd_amount = size_position(broker, bot_cfg)
+        if usd_amount <= 0:
+            continue
+        try:
+            fill = broker.buy(
+                market_id=market.market_id,
+                token_id=candidate["token_id"],
+                outcome=candidate["outcome"],
+                usd_amount=usd_amount,
+                order_book=candidate["book"],
             )
-            log.info(
-                "BUY %s %s @ %.3f ($%.2f) | oracle: %s",
-                market.slug,
-                candidate["outcome"],
-                fill["avg_price"],
-                fill["cost"],
-                reason,
-            )
-            fills.append(record)
+        except (InsufficientLiquidity, InsufficientBalance) as exc:
+            log.info("skipped %s/%s: %s", market.slug, candidate["outcome"], exc)
+            continue
+
+        record = journal.log_trade(
+            BOT_NAME,
+            kind="entry",
+            market_slug=market.slug,
+            question=market.question,
+            entry_price=candidate["ask_price"],
+            seconds_to_resolution=market.seconds_to_resolution(),
+            oracle_guard_reason=reason,
+            **fill,
+        )
+        log.info(
+            "BUY %s %s @ %.3f ($%.2f) | oracle: %s",
+            market.slug,
+            candidate["outcome"],
+            fill["avg_price"],
+            fill["cost"],
+            reason,
+        )
+        fills.append(record)
 
     if not fills:
         log.info("no candidates found this scan")
