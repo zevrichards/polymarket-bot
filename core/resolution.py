@@ -1,20 +1,23 @@
 """Checks whether a specific outcome token has settled, via Gamma's per-market
 closed/outcomePrices fields.
 
-Known limitation (confirmed by direct API probing, see BUILD_INTELLIGENCE_REPORT.md):
-Polymarket's short-duration "btc-updown-5m/15m" markets do NOT reliably
-populate `closed`/`outcomePrices` on Gamma, even long after they expire --
-verified against a market that ended 6+ months ago and still reports
-`closed: false`, `outcomePrices: null`. Other market types (single-day BTC
-threshold markets, etc.) resolve normally. There is currently no other
-public API found that reliably reports settlement for the 5m/15m markets --
-the CLOB's order book disappears after expiry (404) and get_last_trade_price
-returns a stale pre-resolution value, not the settlement price.
+Confirmed working (by polling a live market by ID across its resolution,
+see BUILD_INTELLIGENCE_REPORT.md Session 3): `btc-updown-5m/15m` markets
+with real trading volume resolve cleanly through this exact endpoint,
+typically within ~3-4 minutes after the window's `endDate` -- `closed`
+flips to `true` and `outcomePrices` converges to `["1","0"]` or `["0","1"]`.
 
-check_token_resolution() returns None for "not resolved yet" exactly the
-same as "can't tell" -- callers are expected to apply their own staleness
-grace period (see resolve_stale_grace_seconds usage in the bots) rather than
-treating a None forever as "still open."
+One real edge case found: a market with `liquidity: "0"` and `volume: "0"`
+(i.e. nobody ever traded it) stayed `closed: false` / `outcomePrices: null`
+indefinitely -- likely because there's nothing for the resolver to settle.
+This is rare (our bots only enter markets with live order-book depth, so a
+position should never end up in a truly dead market) but is why
+`resolve_broker_positions` logs a one-time warning after 30 minutes rather
+than assuming every unresolved position will eventually resolve.
+
+check_token_resolution() returns None both for "not resolved yet" and for
+"can't tell" -- callers should expect a few minutes of None after a
+market's endDate passes before a real settlement shows up.
 """
 from __future__ import annotations
 

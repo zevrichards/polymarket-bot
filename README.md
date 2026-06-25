@@ -56,18 +56,15 @@ Run this anytime to see win/loss counts and realized PnL per bot:
 python -m scripts.report
 ```
 
-**Known limitation:** Polymarket's Gamma API does not reliably report
-settlement for the short-duration `btc-updown-5m`/`btc-updown-15m` markets --
-confirmed by checking a market that ended 6+ months ago, which still
-reports `closed: false` and `outcomePrices: null`. Other market types
-(single-day BTC threshold markets, etc.) resolve normally through the same
-check. Positions on unresolvable markets are left open rather than guessed
-at, and after 30 minutes past expected resolution they log a one-time
-warning rather than being silently stuck forever. See `core/resolution.py`
-and `BUILD_INTELLIGENCE_REPORT.md` for the full investigation -- this means
-PnL tracking currently works correctly for longer-dated BTC markets but is
-incomplete for the 5m/15m up/down markets specifically, pending either a
-better API or a different settlement-detection approach.
+Settlement for `btc-updown-5m`/`btc-updown-15m` markets shows up via this
+same Gamma endpoint within ~3-4 minutes of the window's `endDate` -- so a
+position may briefly show as "open/unresolved" right after entry and clear
+up on the next scan or two. Confirmed by polling a live market by ID across
+its actual resolution (see `BUILD_INTELLIGENCE_REPORT.md`). The one edge
+case that doesn't resolve is a market with zero trading volume/liquidity,
+which our bots shouldn't enter in the first place since they require live
+order-book depth to fill a trade -- if a position is still unresolved after
+30 minutes, that's logged as a one-time warning rather than assumed normal.
 
 ## Config (`config.json`)
 

@@ -105,3 +105,17 @@
 
 ### Config & environment (this session)
 - No new config fields. `core/resolution.STALE_WARNING_SECONDS = 1800` (30 min) is a hardcoded threshold, not yet in `config.json` — could move there if it needs tuning later.
+
+---
+
+## SESSION 3 — Correction: resolution tracking actually works (2026-06-24)
+
+**Critical correction to Session 2.** The Session 2 conclusion ("Gamma never reliably reports settlement for btc-updown-5m/15m markets") was **wrong**, and the root cause is a classic one: generalizing from a single, unrepresentative data point without checking *why* it was different.
+
+- **What happened:** Session 2 tested exactly one historical `btc-updown-5m` market (6+ months old) by ID, found `closed: false` / `outcomePrices: null`, and concluded the entire market type doesn't resolve via Gamma. Documented this as a platform-wide data gap in the README and this file.
+- **Why it was wrong:** That specific market had `"liquidity": "0"` and `"volume": "0"` — it never had a single trade. It's a dead/orphaned market, not a representative example. **Never generalize "this API doesn't work for market type X" from one example without checking whether that example has some other distinguishing property (volume, liquidity, age, status flags) that could explain the anomaly on its own.**
+- **How it was caught:** The user pushed back with a concrete claim from their own research ("the API's outcomePrices field will converge to [1.0, 0.0] once the window closes") and asked directly whether that matched what was tried. Re-tested properly: found a market that was minutes from resolving, polled it by ID every 20s across the resolution boundary, and watched `closed` flip `true` and `outcomePrices` converge to `["1","0"]` about 3-4 minutes after `endDate`. **This is exactly what the user's research described, and it directly contradicted the Session 2 conclusion.**
+- **Fix:** No code changes were needed — `core/resolution.check_token_resolution()` was already correct (returns `True`/`False`/`None` based on exactly this signal). Only the docstrings, README, and this file's narrative needed correcting. `STALE_WARNING_SECONDS = 1800` (30 min) is now understood to be far more lenient than the real ~3-4 minute settlement delay, which is fine — it's a backstop for the genuine zero-volume edge case, not the normal path.
+- **Tokens wasted:** high across two sessions — a full "known limitation" narrative was built, written into two docs, and reported to the user as fact, all from one bad example.
+
+**Mandatory lesson for future builds: when an API appears to behave inconsistently for a specific entity (a market, a user, a token), check that entity's own metadata (volume, status, age, flags) for an explanation before concluding the API itself is broken for that category.** A single zero-volume/zero-liquidity outlier is not evidence of a systemic gap. When a user says "are you sure?" or cites their own research that contradicts a conclusion you reported, that is a strong signal to redo the test with a better sample, not to defend the original finding.
