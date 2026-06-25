@@ -113,6 +113,8 @@ def run_once(cfg: dict | None = None, broker: PaperBroker | None = None) -> list
     for market in btc_markets:
         if broker.has_open_position_for_market(market.market_id):
             continue  # already holding a position here -- don't add to or flip it
+        if broker.has_open_position_for_event(market.end_date.isoformat()):
+            continue  # already exposed to this resolution event via a different strike
         for candidate in find_candidates(market, bot_cfg):
             market_candidates.append((market, candidate))
 
@@ -131,6 +133,7 @@ def run_once(cfg: dict | None = None, broker: PaperBroker | None = None) -> list
                 outcome=candidate["outcome"],
                 usd_amount=usd_amount,
                 order_book=candidate["book"],
+                event_key=market.end_date.isoformat(),
             )
         except (InsufficientLiquidity, InsufficientBalance) as exc:
             log.info("skipped %s/%s: %s", market.slug, candidate["outcome"], exc)

@@ -99,6 +99,30 @@ def test_resolve_unknown_token_raises(tmp_path):
         broker.resolve("nonexistent", won=True)
 
 
+def test_has_open_position_for_event_catches_cross_scan_correlation(tmp_path):
+    # Regression test: a within-scan correlation cap isn't enough, because
+    # two correlated strikes can each be the *only* candidate on separate,
+    # consecutive scans -- this is the cross-scan check that catches it.
+    broker = make_broker(tmp_path)
+    assert broker.has_open_position_for_event("2026-06-25T11:00:00+00:00") is False
+
+    broker.buy(
+        "m1", "t1", "Yes", 2.0, load_fixture_book(),
+        event_key="2026-06-25T11:00:00+00:00",
+    )
+
+    # Same event, different market/strike -- must be blocked.
+    assert broker.has_open_position_for_event("2026-06-25T11:00:00+00:00") is True
+    # A different event is unaffected.
+    assert broker.has_open_position_for_event("2026-06-25T12:00:00+00:00") is False
+
+
+def test_has_open_position_for_event_ignores_empty_key(tmp_path):
+    broker = make_broker(tmp_path)
+    broker.buy("m1", "t1", "Yes", 2.0, load_fixture_book())  # no event_key passed
+    assert broker.has_open_position_for_event("") is False
+
+
 def test_repeat_buy_averages_position(tmp_path):
     # Each call is given the same static book snapshot (the broker doesn't
     # mutate it), so both buys fill against the cheapest 0.90 level.

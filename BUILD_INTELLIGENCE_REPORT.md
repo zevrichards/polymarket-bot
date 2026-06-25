@@ -146,3 +146,27 @@
 
 ### Config & environment (this session)
 - Added `directional_bot.max_correlated_markets_per_event = 1` to `config.json` (shared by oracle_bot, which reuses the `directional_bot` config block). Not yet tuned/tested against a second overnight run.
+
+---
+
+## SESSION 5 — The Session 4 correlation fix had a gap; py-clob-client has no timeout (2026-06-25)
+
+**What happened:** Restarted the bots after Session 4's fixes, checked back ~2-3 hours later, and found the exact correlation bug again -- two different "Bitcoin above $X" strikes sharing the same `11am ET` resolution timestamp were both bought, 57 seconds apart.
+
+### Critical bugs & fixes (this session)
+- **Problem:** Session 4's `select_candidates()` only caps correlated candidates found within the *same* scan call. It missed the case where strike A is the only qualifying candidate on scan N, gets bought, and strike B (same resolution timestamp) becomes the only qualifying candidate on scan N+1 (60s later) -- each scan sees only one candidate, so the within-scan grouping never has anything to group.
+  - **Root Cause:** Designed the fix around "candidates found together in one scan" when the actual bug is about "exposure to one resolution event over the position's whole lifetime," which spans many scans.
+  - **Fix:** Added `Position.event_key` (the market's `end_date.isoformat()`) and `PaperBroker.has_open_position_for_event(event_key)`, checked before considering a market as a candidate at all -- alongside the existing same-scan cap, not instead of it. **Lesson: when fixing a "two things are secretly correlated" bug, check whether the correlation can manifest across separate decision cycles, not just within one. A within-batch fix is not the same as a within-lifetime fix.**
+  - **Tokens wasted:** medium -- caught quickly this time because the BUILD_INTELLIGENCE_REPORT.md habit from Session 4 meant the report's "open/unresolved" section was already being checked as a matter of course.
+
+- **Problem (found while restarting, not from the trading data):** `market_maker_bot`'s first scan appeared to hang indefinitely on its very first order-book fetch.
+  - **Root Cause:** Inspected `py_clob_client`'s source directly -- zero occurrences of "timeout" anywhere in its `http_helpers/`. It sets no timeout on any HTTP call, so a slow/degraded Polymarket endpoint can stall a call forever, with no exception for `core/scheduler.py`'s retry-on-failure loop to catch.
+  - **Fix:** `socket.setdefaulttimeout(15)` once in `core/clob_client.py` -- a process-wide default that any socket without its own explicit timeout falls back to. Confirmed via direct testing that this was masking a real (if temporary) Polymarket API slowdown, not a true infinite hang: a `market_maker_bot` scan that normally takes ~6s took 4m10s but still completed successfully end to end once watched all the way through.
+  - **Tokens wasted:** medium -- required directly reading the third-party library's source to confirm absence of a timeout, since the symptom (apparent hang) could equally have been our own bug.
+
+### Loss prevention features (this session, additive to prior sessions' lists)
+- **Event-level correlation guard now spans the position's full lifetime, not just one scan.** `has_open_position_for_event()` is checked independently of (and in addition to) the within-scan `select_candidates()` cap. **NON-NEGOTIABLE**, and a reminder that this class of bug needs testing across multiple consecutive scan cycles, not just a single-scan unit test -- the regression test for this (`test_has_open_position_for_event_catches_cross_scan_correlation`) deliberately calls `buy()` once and then checks the guard separately, mirroring two different scans.
+- **Process-wide socket timeout** (`core/clob_client.py`, 15s) -- any future code that touches a third-party HTTP client should not assume it sets its own timeout. Check the library's source if in doubt; don't assume.
+
+### Known limitation observed, not a bug
+- Pre-existing open positions from before this session's fix don't have `event_key` set (defaults to `""`), so they won't retroactively block a third correlated strike from slipping through until they resolve and clear out. This is an acceptable one-time gap for already-open state, not a flaw in the fix itself -- new positions opened after this fix are always tagged correctly.

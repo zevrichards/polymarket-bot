@@ -6,20 +6,28 @@ $0.85-$0.99 band with a short window left before resolution -- the classic
 the source article. Paper-trading only; see README for what's deferred
 before this can run live.
 
-Two guards added after an overnight paper-trading run exposed real bugs
-(see BUILD_INTELLIGENCE_REPORT.md Session 4):
+Guards added after paper-trading runs exposed real bugs (see
+BUILD_INTELLIGENCE_REPORT.md Sessions 4 and 5):
 
 1. Never enter a market we already hold a position in. Without this, the
    bot re-bought into the same market on consecutive scans (pyramiding),
    and in one case bought BOTH outcomes of the same market -- a guaranteed
    loss on the combination once both legs' prices sum to over $1.
 2. Cap how many candidates resolving at the *same exact timestamp* get
-   traded per scan. Polymarket lists separate "Bitcoin above $X" markets
-   per strike price, all resolving off one underlying price observation --
-   they're not independent bets. Without this cap, the bot took 7
-   simultaneous "No" positions across a strike ladder, all correlated to
-   one BTC move, and lost all 7 together when price rallied through every
-   strike -- effectively one 7x-oversized bet disguised as 7 small ones.
+   traded per scan (within-scan correlation cap). Polymarket lists separate
+   "Bitcoin above $X" markets per strike price, all resolving off one
+   underlying price observation -- they're not independent bets. Without
+   this cap, the bot took 7 simultaneous "No" positions across a strike
+   ladder, all correlated to one BTC move, and lost all 7 together when
+   price rallied through every strike.
+3. Block entering a new market if we already hold a position in ANY market
+   sharing the same resolution timestamp (cross-scan correlation cap, via
+   PaperBroker.has_open_position_for_event). Guard #2 alone wasn't enough:
+   two correlated strikes can each become the *sole* qualifying candidate
+   on consecutive 60s-apart scans, so a same-scan-only check never sees
+   them together. This was caught on a second run where exactly that
+   happened -- two different strikes of the same "11am ET" event were
+   bought 57 seconds apart, each the only candidate in its own scan.
 """
 from __future__ import annotations
 
@@ -119,6 +127,8 @@ def run_once(cfg: dict | None = None, broker: PaperBroker | None = None) -> list
     for market in btc_markets:
         if broker.has_open_position_for_market(market.market_id):
             continue  # already holding a position here -- don't add to or flip it
+        if broker.has_open_position_for_event(market.end_date.isoformat()):
+            continue  # already exposed to this resolution event via a different strike
         for candidate in find_candidates(market, bot_cfg):
             market_candidates.append((market, candidate))
 
@@ -138,6 +148,7 @@ def run_once(cfg: dict | None = None, broker: PaperBroker | None = None) -> list
                 outcome=candidate["outcome"],
                 usd_amount=usd_amount,
                 order_book=candidate["book"],
+                event_key=market.end_date.isoformat(),
             )
         except (InsufficientLiquidity, InsufficientBalance) as exc:
             log.info("skipped %s/%s: %s", market.slug, candidate["outcome"], exc)

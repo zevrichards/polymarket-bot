@@ -27,6 +27,7 @@ class Position:
     shares: float
     avg_price: float
     opened_at: str = ""  # ISO timestamp, used for stale-position warnings
+    event_key: str = ""  # market.end_date.isoformat() -- shared by correlated strike-ladder markets
 
 
 @dataclass
@@ -82,6 +83,23 @@ class PaperBroker:
         combination once both legs' prices sum to more than $1)."""
         return any(p.market_id == market_id for p in self.state.positions.values())
 
+    def has_open_position_for_event(self, event_key: str) -> bool:
+        """True if we already hold a position in ANY market sharing this
+        resolution event (e.g. a strike-ladder of "Bitcoin above $X"
+        markets all settling off one price observation at one timestamp).
+
+        This is a separate check from has_open_position_for_market because
+        the bug it fixes is cross-scan: a within-scan correlation cap (see
+        bots/directional_bot.select_candidates) only sees candidates found
+        in the *same* scan, but two correlated strikes can each become the
+        sole qualifying candidate on consecutive scans 60s apart, slipping
+        past a same-scan-only check entirely. This catches that case by
+        looking at the full set of currently open positions, not just the
+        current scan's batch."""
+        if not event_key:
+            return False
+        return any(p.event_key == event_key for p in self.state.positions.values())
+
     def buy(
         self,
         market_id: str,
@@ -89,6 +107,7 @@ class PaperBroker:
         outcome: str,
         usd_amount: float,
         order_book,
+        event_key: str = "",
     ) -> dict:
         """Simulate a market buy by walking the book's ask levels.
 
@@ -146,6 +165,7 @@ class PaperBroker:
                 shares=shares_bought,
                 avg_price=avg_price,
                 opened_at=datetime.now(timezone.utc).isoformat(),
+                event_key=event_key,
             )
         self.save()
 
