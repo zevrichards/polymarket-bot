@@ -70,6 +70,35 @@ def test_state_persists_across_instances(tmp_path):
     assert "t1" in reloaded.state.positions
 
 
+def test_resolve_win_pays_out_full_share_value(tmp_path):
+    broker = make_broker(tmp_path)
+    broker.buy("m1", "t1", "Up", 4.50, load_fixture_book())  # 5.0 shares @ 0.90, cost $4.50
+
+    result = broker.resolve("t1", won=True)
+
+    assert result["payout"] == pytest.approx(5.0)
+    assert result["pnl"] == pytest.approx(5.0 - 4.50)
+    assert broker.balance == pytest.approx(95.50 + 5.0)
+    assert "t1" not in broker.state.positions
+
+
+def test_resolve_loss_pays_out_nothing(tmp_path):
+    broker = make_broker(tmp_path)
+    broker.buy("m1", "t1", "Up", 4.50, load_fixture_book())
+
+    result = broker.resolve("t1", won=False)
+
+    assert result["payout"] == 0.0
+    assert result["pnl"] == pytest.approx(-4.50)
+    assert broker.balance == pytest.approx(95.50)  # no payout added
+
+
+def test_resolve_unknown_token_raises(tmp_path):
+    broker = make_broker(tmp_path)
+    with pytest.raises(KeyError):
+        broker.resolve("nonexistent", won=True)
+
+
 def test_repeat_buy_averages_position(tmp_path):
     # Each call is given the same static book snapshot (the broker doesn't
     # mutate it), so both buys fill against the cheapest 0.90 level.

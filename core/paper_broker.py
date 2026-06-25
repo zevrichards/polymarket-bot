@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 STATE_PATH = Path(__file__).resolve().parent.parent / "logs" / "paper_state.json"
@@ -25,6 +26,7 @@ class Position:
     outcome: str
     shares: float
     avg_price: float
+    opened_at: str = ""  # ISO timestamp, used for stale-position warnings
 
 
 @dataclass
@@ -135,6 +137,7 @@ class PaperBroker:
                 outcome=outcome,
                 shares=shares_bought,
                 avg_price=avg_price,
+                opened_at=datetime.now(timezone.utc).isoformat(),
             )
         self.save()
 
@@ -145,5 +148,31 @@ class PaperBroker:
             "shares": shares_bought,
             "avg_price": avg_price,
             "cost": cost,
+            "balance_after": self.state.balance,
+        }
+
+    def resolve(self, token_id: str, won: bool) -> dict:
+        """Settle a position once its market has resolved. Pays out
+        shares * $1 if won, $0 if lost, and removes the position."""
+        position = self.state.positions.pop(token_id, None)
+        if position is None:
+            raise KeyError(f"no open position for token_id={token_id}")
+
+        payout = position.shares * (1.0 if won else 0.0)
+        cost_basis = position.shares * position.avg_price
+        pnl = payout - cost_basis
+
+        self.state.balance += payout
+        self.save()
+
+        return {
+            "market_id": position.market_id,
+            "token_id": token_id,
+            "outcome": position.outcome,
+            "shares": position.shares,
+            "won": won,
+            "payout": payout,
+            "cost_basis": cost_basis,
+            "pnl": pnl,
             "balance_after": self.state.balance,
         }

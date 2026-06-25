@@ -14,6 +14,10 @@ def test_fetch_btc_markets_returns_well_formed_results():
 
 
 def test_results_are_sorted_soonest_first():
+    # Compare end_date directly rather than calling seconds_to_resolution()
+    # per item -- that method stamps `now` on each call, so two calls a
+    # microsecond apart can disagree by a few microseconds and make an
+    # already-correctly-sorted list look unsorted.
     btc_markets = fetch_btc_markets(max_pages=5)
-    times = [m.seconds_to_resolution() for m in btc_markets if m.seconds_to_resolution() is not None]
-    assert times == sorted(times)
+    end_dates = [m.end_date for m in btc_markets if m.end_date is not None]
+    assert end_dates == sorted(end_dates)

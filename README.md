@@ -38,11 +38,36 @@ python -m bots.directional_bot
 ```
 
 Each run reads/writes its own state under `logs/` (gitignored):
-- `logs/trades.jsonl` -- every simulated trade, all bots, one JSON line each
-- `logs/paper_state.json` -- Bot 1 & 2's shared virtual balance + positions
+- `logs/trades.jsonl` -- every simulated trade and resolution, all bots, one JSON line each (`kind: "entry"` or `kind: "resolution"`)
+- `logs/paper_state.json` -- Bot 1's virtual balance + open positions
+- `logs/oracle_paper_state.json` -- Bot 2's virtual balance + open positions (kept separate from Bot 1's so PnL isn't mixed between the two)
 - `logs/mm_state.json` -- Bot 3's resting quotes + inventory per market
-- `logs/oracle_state.json` -- Bot 2's last-observed BTC/USD price
+- `logs/oracle_state.json` -- Bot 2's last-observed BTC/USD price (for the divergence guard)
 - `logs/learnings.md` -- free-text notes (e.g. why a scan was skipped)
+
+Every scan also checks whether any open position/quote has resolved (see
+"Settlement & PnL" below) before looking for new trades.
+
+## Settlement & PnL
+
+Run this anytime to see win/loss counts and realized PnL per bot:
+
+```bash
+python -m scripts.report
+```
+
+**Known limitation:** Polymarket's Gamma API does not reliably report
+settlement for the short-duration `btc-updown-5m`/`btc-updown-15m` markets --
+confirmed by checking a market that ended 6+ months ago, which still
+reports `closed: false` and `outcomePrices: null`. Other market types
+(single-day BTC threshold markets, etc.) resolve normally through the same
+check. Positions on unresolvable markets are left open rather than guessed
+at, and after 30 minutes past expected resolution they log a one-time
+warning rather than being silently stuck forever. See `core/resolution.py`
+and `BUILD_INTELLIGENCE_REPORT.md` for the full investigation -- this means
+PnL tracking currently works correctly for longer-dated BTC markets but is
+incomplete for the 5m/15m up/down markets specifically, pending either a
+better API or a different settlement-detection approach.
 
 ## Config (`config.json`)
 

@@ -13,7 +13,7 @@ import json
 import logging
 from pathlib import Path
 
-from core import clob_client, journal, markets
+from core import clob_client, journal, markets, resolution
 from core.paper_broker import InsufficientBalance, InsufficientLiquidity, PaperBroker
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
@@ -66,6 +66,11 @@ def run_once(cfg: dict | None = None, broker: PaperBroker | None = None) -> list
         )
 
     broker = broker or PaperBroker(starting_balance=cfg["starting_balance"])
+
+    resolved = resolution.resolve_broker_positions(broker, BOT_NAME)
+    if resolved:
+        log.info("settled %d resolved position(s)", len(resolved))
+
     fills = []
 
     btc_markets = markets.fetch_btc_markets()
@@ -92,6 +97,7 @@ def run_once(cfg: dict | None = None, broker: PaperBroker | None = None) -> list
 
             record = journal.log_trade(
                 BOT_NAME,
+                kind="entry",
                 market_slug=market.slug,
                 question=market.question,
                 entry_price=candidate["ask_price"],

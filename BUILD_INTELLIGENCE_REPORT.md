@@ -74,3 +74,34 @@
 - `mode: "paper" | "live"` in `config.json` is the single switch intended to route execution between `PaperBroker` and a future real `ClobClient` order-placement path — chosen specifically so strategy code never needs to change between phases.
 - `POLYGON_RPC_URL` is read from environment (`.env`), defaulting to `polygon-bor-rpc.publicnode.com` (the one confirmed working in this session) rather than the commonly-suggested `polygon-rpc.com`.
 - Initial threshold values (`min_entry_price=0.85`, `max_entry_price=0.99`, `max_seconds_to_resolution=120`, `min_seconds_to_resolution=5`, `max_bet=2.0`, `max_bankroll_fraction=0.02`, `max_divergence_pct=0.15`, market-maker `target_spread=0.04`/`requote_threshold=0.01`/`max_inventory=10.0`) are **starting guesses carried over from the source strategy description, not yet tuned against real trade history** — no live trades have been collected yet to validate or adjust them.
+
+---
+
+## SESSION 2 — Resolution tracking & PnL reporting (2026-06-24)
+
+**What was added:** `core/resolution.py` (settlement checking), `PaperBroker.resolve()`, a resolve step wired into all 3 bots' scan loops, and `scripts/report.py` for win/loss/PnL summaries.
+
+### Critical bugs & fixes (this session)
+- **Problem:** Bot 1 and Bot 2 both defaulted to `core.paper_broker.STATE_PATH` (`logs/paper_state.json`) with no override, silently sharing one balance/position pool between two bots that are supposed to be tracked independently.
+  - **Root Cause:** Neither bot passed a `state_path` to `PaperBroker(...)` when constructing it.
+  - **Fix:** Bot 2 now uses its own `logs/oracle_paper_state.json`. **Any new bot added to this repo must pass its own `state_path` to `PaperBroker` — never rely on the default if it's meant to be tracked independently.**
+  - **Tokens Wasted:** medium — not caught until deliberately building the PnL report and asking "whose balance is this."
+
+- **Problem:** A flaky test (`test_results_are_sorted_soonest_first`) called `market.seconds_to_resolution()` twice (once to build the list, implicitly again via repeated `datetime.now()` calls), so two calls microseconds apart could disagree and make an already-correctly-sorted list look unsorted.
+  - **Root Cause:** `seconds_to_resolution()` stamps `datetime.now()` fresh on every call rather than taking a shared reference time.
+  - **Fix:** Test now compares `market.end_date` directly (a fixed value) instead of calling a time-dependent method twice. **General lesson: never call a "time since now" method more than once per comparison in a test — compute the fixed timestamp once and compare that.**
+  - **Tokens Wasted:** low
+
+### Architecture decisions that failed (this session)
+- **Tried:** Using Polymarket Gamma's `closed`/`outcomePrices` fields to detect settlement on `btc-updown-5m`/`-15m` markets.
+  - **Why abandoned:** Empirically false for this market type. Verified directly: a `btc-updown-5m` market with `endDate` 6+ months in the past still returns `closed: false`, `active: true`, `outcomePrices: null` from Gamma. Cross-checked against other market types (e.g. `ethereum-above-2275-on-april-21-2026-3pm-et`) which DO resolve correctly via the same fields (`closed: true`, `outcomePrices: ["1","0"]`) — so this is specific to the short-duration crypto up/down markets, likely because they settle via a Chainlink data-stream path that doesn't write back through Gamma's normal UMA-resolution flow.
+  - **Also tried and failed:** CLOB's `get_order_book`/`get_midpoint` on an expired token → 404 (book is removed after expiry). CLOB's `get_last_trade_price` on the same token → returned a stale `0.5`, not the actual settlement price. Neither is a usable settlement signal.
+  - **Current state:** `core/resolution.check_token_resolution()` works correctly for market types where Gamma's fields are reliable (confirmed: single-day BTC threshold markets). For `btc-updown-5m/15m` specifically, positions are left open and flagged with a one-time staleness warning after 30 min rather than guessed at. **This is a real, unresolved data-availability gap, not a bug to "fix" by guessing — do not invent a settlement price from a proxy signal (e.g. last live order-book price right before expiry) without being explicit that it's an approximation, not ground truth.**
+  - **Prevents:** the next instance from re-discovering this the hard way, or worse, silently fabricating win/loss outcomes for the most commonly-traded market type in this bot.
+
+### Loss prevention features (this session, additive to Session 1's list)
+- **Resolution checking never guesses.** `check_token_resolution()` returns `None` (not resolved / can't tell) unless the settlement price is unambiguous (`>= 0.95` or `<= 0.05` on a closed market). A closed-but-ambiguous price is treated the same as "not resolved" rather than rounded to a guess. **NON-NEGOTIABLE** — a wrong settlement guess corrupts every PnL number downstream of it.
+- **Per-bot paper balances are isolated** (separate state files for Bot 1 vs Bot 2) specifically so the PnL report can attribute results to the correct strategy.
+
+### Config & environment (this session)
+- No new config fields. `core/resolution.STALE_WARNING_SECONDS = 1800` (30 min) is a hardcoded threshold, not yet in `config.json` — could move there if it needs tuning later.

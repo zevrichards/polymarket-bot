@@ -27,7 +27,7 @@ import logging
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from core import clob_client, journal, markets as markets_module
+from core import clob_client, journal, markets as markets_module, resolution
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 MM_STATE_PATH = Path(__file__).resolve().parent.parent / "logs" / "mm_state.json"
@@ -44,6 +44,8 @@ class Quote:
     ask_price: float
     inventory: float = 0.0
     cash: float = 0.0  # net cash flow from fills on this market (negative = spent)
+    market_id: str | None = None  # needed to check resolution; None on old/pre-upgrade state
+    outcome: str | None = None
 
 
 @dataclass
@@ -113,14 +115,63 @@ def should_requote(quote: Quote, mid: float, cfg: dict) -> bool:
     return abs(mid - current_mid) / current_mid > cfg["requote_threshold"]
 
 
-def make_quote(mid: float, cfg: dict, inventory: float = 0.0, cash: float = 0.0) -> Quote:
+def make_quote(
+    mid: float,
+    cfg: dict,
+    inventory: float = 0.0,
+    cash: float = 0.0,
+    market_id: str | None = None,
+    outcome: str | None = None,
+) -> Quote:
     half_spread = cfg["target_spread"] / 2
     return Quote(
         bid_price=round(max(0.01, mid - half_spread), 2),
         ask_price=round(min(0.99, mid + half_spread), 2),
         inventory=inventory,
         cash=cash,
+        market_id=market_id,
+        outcome=outcome,
     )
+
+
+def resolve_quotes(state: MMState, bot_name: str = BOT_NAME) -> list[dict]:
+    """Settle any resolved market's remaining inventory at $1/$0 and drop
+    the quote -- no point continuing to track a market that's over.
+    Quotes created before this field existed have market_id=None and can't
+    be resolved; they're left alone (will just stop getting requoted once
+    fetch_btc_markets() no longer returns their now-expired market).
+    """
+    results = []
+    for token_id, quote in list(state.quotes.items()):
+        if quote.market_id is None:
+            continue
+        won = resolution.check_token_resolution(quote.market_id, token_id)
+        if won is None:
+            continue
+
+        payout = quote.inventory * (1.0 if won else 0.0)
+        quote.cash += payout
+        pnl = quote.cash  # cash already nets all buy/sell fills on this market
+
+        record = journal.log_trade(
+            bot_name,
+            kind="resolution",
+            market_id=quote.market_id,
+            outcome=quote.outcome,
+            token_id=token_id,
+            inventory_settled=quote.inventory,
+            won=won,
+            payout=payout,
+            pnl=pnl,
+        )
+        log.info(
+            "RESOLVED %s/%s | won=%s inventory=%.2f payout=$%.2f pnl=%+.2f",
+            quote.market_id, quote.outcome, won, quote.inventory, payout, pnl,
+        )
+        results.append(record)
+        del state.quotes[token_id]
+
+    return results
 
 
 def run_once(cfg: dict | None = None, state: MMState | None = None) -> list[dict]:
@@ -133,6 +184,11 @@ def run_once(cfg: dict | None = None, state: MMState | None = None) -> list[dict
 
     state = state if state is not None else load_state()
     events = []
+
+    resolved = resolve_quotes(state)
+    if resolved:
+        log.info("settled %d resolved quote(s)", len(resolved))
+        save_state(state)
 
     btc_markets = markets_module.fetch_btc_markets()
     log.info("scanned %d BTC markets", len(btc_markets))
@@ -156,7 +212,7 @@ def run_once(cfg: dict | None = None, state: MMState | None = None) -> list[dict
 
             quote = state.quotes.get(token_id)
             if quote is None:
-                quote = make_quote(mid, bot_cfg)
+                quote = make_quote(mid, bot_cfg, market_id=market.market_id, outcome=outcome)
                 state.quotes[token_id] = quote
                 log.info("%s/%s: new quote bid=%.2f ask=%.2f", market.slug, outcome, quote.bid_price, quote.ask_price)
                 continue
@@ -176,7 +232,11 @@ def run_once(cfg: dict | None = None, state: MMState | None = None) -> list[dict
                 events.append(record)
 
             if quote.inventory < bot_cfg["max_inventory"] and should_requote(quote, mid, bot_cfg):
-                new_quote = make_quote(mid, bot_cfg, inventory=quote.inventory, cash=quote.cash)
+                new_quote = make_quote(
+                    mid, bot_cfg,
+                    inventory=quote.inventory, cash=quote.cash,
+                    market_id=quote.market_id or market.market_id, outcome=quote.outcome or outcome,
+                )
                 state.quotes[token_id] = new_quote
                 log.info(
                     "%s/%s: requote bid=%.2f ask=%.2f (mid moved to %.3f)",

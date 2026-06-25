@@ -26,12 +26,15 @@ import logging
 from pathlib import Path
 
 from bots.directional_bot import find_candidates, size_position
-from core import chainlink, journal
+from core import chainlink, journal, resolution
 from core import markets as markets_module
 from core.paper_broker import InsufficientBalance, InsufficientLiquidity, PaperBroker
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 ORACLE_STATE_PATH = Path(__file__).resolve().parent.parent / "logs" / "oracle_state.json"
+# Separate paper balance/positions from directional_bot's -- they'd otherwise
+# silently share core.paper_broker.STATE_PATH and mix PnL between bots.
+ORACLE_BROKER_STATE_PATH = Path(__file__).resolve().parent.parent / "logs" / "oracle_paper_state.json"
 BOT_NAME = "oracle_bot"
 MAX_FEED_AGE_SECONDS = 300  # Chainlink updates on ~heartbeat/deviation, not every block
 
@@ -89,13 +92,20 @@ def run_once(cfg: dict | None = None, broker: PaperBroker | None = None) -> list
             "live trading is intentionally not implemented yet -- see README"
         )
 
+    broker = broker or PaperBroker(
+        starting_balance=cfg["starting_balance"], state_path=ORACLE_BROKER_STATE_PATH
+    )
+
+    resolved = resolution.resolve_broker_positions(broker, BOT_NAME)
+    if resolved:
+        log.info("settled %d resolved position(s)", len(resolved))
+
     ok, reason = oracle_guard_ok(cfg)
     log.info("oracle guard: %s (%s)", "PASS" if ok else "BLOCK", reason)
     if not ok:
         journal.append_learning(BOT_NAME, f"Scan skipped -- oracle guard blocked: {reason}")
         return []
 
-    broker = broker or PaperBroker(starting_balance=cfg["starting_balance"])
     fills = []
 
     btc_markets = markets_module.fetch_btc_markets()
@@ -121,6 +131,7 @@ def run_once(cfg: dict | None = None, broker: PaperBroker | None = None) -> list
 
             record = journal.log_trade(
                 BOT_NAME,
+                kind="entry",
                 market_slug=market.slug,
                 question=market.question,
                 entry_price=candidate["ask_price"],
