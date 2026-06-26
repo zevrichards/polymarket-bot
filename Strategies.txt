@@ -1,0 +1,169 @@
+POLYMARKET BOT STRATEGIES -- WHAT THEY DO AND WHY THEY'RE LOSING
+====================================================================
+Last updated: 2026-06-25, after paper-trading all three strategies through
+several rounds of bug fixes and a clean, contamination-free test run.
+
+This file is a plain-language reference for what each bot actually does,
+since the mechanics are easy to misstate casually. See
+BUILD_INTELLIGENCE_REPORT.md for the technical bug/fix history; this file
+is about the trading logic itself, not the code.
+
+
+--------------------------------------------------------------------
+BOT 1: DIRECTIONAL ("buy the favorite cheap")
+--------------------------------------------------------------------
+
+What it does:
+  Polymarket runs short-duration "Bitcoin Up or Down" markets (5 min, 15
+  min, and longer "Bitcoin above $X" threshold markets). Each market has
+  two outcome tokens -- e.g. "Up" and "Down" -- that the market prices
+  between $0 and $1, roughly like a probability. As a market nears its
+  resolution time, if one side becomes heavily favored, its price climbs
+  toward $1 (the other side's price falls toward $0).
+
+  Bot 1 watches for a market where one side's price is between $0.85 and
+  $0.99, with somewhere between 5 and 120 seconds left before the market
+  resolves. It buys that favored side, betting it holds and pays out $1.
+
+  This is BETTING WITH the market's own stated consensus, not against it
+  -- we only ever buy whichever side the market already thinks is
+  winning. The idea is that a $0.85-$0.99 price still leaves a little bit
+  of "edge" to capture if the favorite is even more likely to win than
+  the price implies.
+
+Why it's losing money:
+  At an average entry price of about $0.96, the payout is asymmetric: win
+  and you make $0.04, lose and you lose the full $0.96. To break even you
+  need to win roughly 96% of the time. In our cleanest test (11 trades
+  each), the bots won 54.5% and 63.6% of the time -- meaningfully more
+  than half, but nowhere near the ~96% bar this price level demands. One
+  wrong call erases the gains from dozens of right ones.
+
+  There is no independent edge built into this strategy at all -- no
+  forecast, no model, nothing except trusting the market's own price.
+  These are highly liquid, fast-moving markets; there's no particular
+  reason to expect the crowd's stated probability to be wrong in our
+  favor specifically.
+
+  Note: the real-world "proof" cited when this idea was sourced (wallets
+  turning small balances into large ones) was specifically described as
+  WEATHER market trades, which had a genuine independent edge (real
+  forecast data compared against market price). Nobody ever demonstrated
+  this particular BTC mechanical idea working. We tested an unproven
+  idea, three separate times, and got a consistent "no edge" result each
+  time.
+
+
+--------------------------------------------------------------------
+BOT 2: ORACLE-VERIFIED ("Bot 1 + a sanity check")
+--------------------------------------------------------------------
+
+What it does:
+  Identical entry rule to Bot 1, but gated behind an independent
+  Chainlink BTC/USD price read before trading. Two checks must pass:
+    1. The price feed must have updated recently (not stale/disconnected).
+    2. BTC's price must not have moved more than a configured threshold
+       since our last check (a sudden jump suggests the market is actively
+       repricing, and the "favorite" might be about to flip).
+  If either check fails, the scan is skipped -- no trade that cycle.
+
+Why it's losing money:
+  Same root cause as Bot 1 -- this is a risk *guard* around the same
+  entry rule, not a different source of edge. It doesn't predict
+  anything; it just occasionally refuses to take the trade Bot 1 would
+  have taken, when the oracle looks unreliable in that moment. The
+  underlying bet is identical, so the same math applies: you need ~96%
+  wins at this price level, and we're not close.
+
+
+--------------------------------------------------------------------
+BOT 3: MARKET MAKER ("capture the spread")
+--------------------------------------------------------------------
+
+What it does:
+  Instead of betting on a direction, this bot tries to profit from
+  providing liquidity. For each outcome token (e.g. the "Up" token), it
+  offers to BUY slightly below the current mid-price and SELL slightly
+  above it -- e.g. if the mid is $0.50 and the configured spread is
+  $0.10, it offers to buy at $0.45 and sell at $0.55. (Important: "mid
+  price" here means the midpoint of that outcome token's own $0-$1
+  price, NOT Bitcoin's actual dollar price. We never trade real BTC.)
+
+  The bot re-centers ("requotes") this offer periodically as the token's
+  real price moves. If real market activity crosses through our offered
+  price -- someone's willing to sell at or below our buy price, or buy at
+  or above our sell price -- we simulate that fill.
+
+  The profit only comes if BOTH legs eventually fill: buy low, then later
+  sell high. The $0.10 gap between the two is the profit margin, but only
+  if both sides actually get taken before the market resolves.
+
+How we test this without risking money:
+  We never place a real order on Polymarket -- there's no wallet, no
+  funds, nothing touching their real order book. Instead, each scan we
+  remember the price we said we'd quote last time, then check
+  Polymarket's REAL live order book (a genuine, free, read-only check of
+  actual market data). If the real market's price has moved enough to
+  cross our remembered quote, we treat that as a simulated fill at our
+  quoted price, and update a pretend cash/inventory balance accordingly.
+  So it's a real-data-driven simulation, not a guess -- we're asking "would
+  an order at this exact price have actually executed against the real
+  market," using real prices, just without ever placing one. The
+  limitation: we only check once every 60 seconds, so a fill that
+  happened and reversed in between checks could be missed or
+  miscounted.
+
+Why it's losing money (and worse than it first looked):
+  The raw "win/loss" count looked roughly neutral (about 50/50), which
+  seemed fine for a strategy that isn't supposed to need a directional
+  edge. But most of those "resolutions" were quotes that never got
+  filled at all (zero inventory the entire time) -- they're free, riskless
+  non-events that were inflating the count without representing real
+  outcomes. Once filtered down to only the resolutions where the bot
+  actually held a real position, the true picture is much worse: it won
+  only about 12% of the time it actually had money on the line.
+
+  This is a textbook market-making failure called adverse selection.
+  Posting a static buy/sell offer works well when prices bounce around
+  randomly -- you buy a dip, sell a bounce, repeat, pocket the spread.
+  It works badly when prices are moving steadily in one direction, which
+  is exactly what happens as a short-duration market converges toward
+  its real outcome. In that situation, you tend to only get the "wrong"
+  leg filled: someone sells to you cheap specifically because they know
+  (or correctly guess) the price is about to keep falling, and it never
+  bounces back up to your sell price. You're left holding inventory
+  heading toward a $0 payout. Widening the spread and quoting further
+  from resolution helped a little (the real win rate went from
+  essentially 0% to about 12%) but didn't fix the underlying problem,
+  because the problem isn't pricing -- it's that we have no way to tell,
+  at the moment of a fill, whether the person trading against us knows
+  something we don't.
+
+
+--------------------------------------------------------------------
+THE COMMON THREAD
+--------------------------------------------------------------------
+
+None of the three strategies has an actual INFORMATION EDGE -- something
+that estimates the true probability of an outcome independently of the
+market's own price.
+
+  - Bots 1/2 take the market's price at face value and bet it's slightly
+    underconfident. No independent estimate of the true probability
+    exists anywhere in the code.
+  - Bot 3 assumes balanced, uninformed order flow, which doesn't exist in
+    the final minutes before a fast-resolving market settles.
+
+Contrast with the weather-trading bot referenced early in this project
+(github.com/alteregoeth-ai/weatherbot): its edge was a genuine independent
+forecast (three weather data sources) compared against the market price,
+with confidence intervals calibrated per city from actual resolved
+trades. That's the structural piece missing here -- there's no equivalent
+independent signal for "what will BTC do in the next 5 minutes" built
+into any of these three bots.
+
+Any future strategy for this project should start by answering: what is
+the independent signal, and why would it disagree with the market's own
+price in our favor? If there's no good answer to that, the strategy is
+likely to fail the same way these three did, regardless of execution
+quality.
