@@ -32,6 +32,8 @@ class BtcMarket:
     token_ids: list[str]  # parallel to outcomes
     active: bool
     closed: bool
+    start_date: datetime | None = None  # the window's actual start (eventStartTime),
+    # NOT Gamma's "startDate" field (that's listing/creation time, see Session 1 notes)
 
     def seconds_to_resolution(self, now: datetime | None = None) -> float | None:
         if self.end_date is None:
@@ -58,6 +60,14 @@ def _parse_market(raw: dict) -> BtcMarket | None:
         except ValueError:
             end_date = None
 
+    start_date = None
+    raw_start = raw.get("eventStartTime")
+    if raw_start:
+        try:
+            start_date = datetime.fromisoformat(raw_start.replace("Z", "+00:00"))
+        except ValueError:
+            start_date = None
+
     return BtcMarket(
         market_id=str(raw.get("id")),
         question=raw.get("question", ""),
@@ -67,6 +77,7 @@ def _parse_market(raw: dict) -> BtcMarket | None:
         token_ids=token_ids,
         active=bool(raw.get("active")),
         closed=bool(raw.get("closed")),
+        start_date=start_date,
     )
 
 

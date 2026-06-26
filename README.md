@@ -1,6 +1,6 @@
 # Polymarket BTC Trading Bots (Paper Trading)
 
-Three bot strategies trading Polymarket's short-duration "Bitcoin Up or
+Four bot strategies trading Polymarket's short-duration "Bitcoin Up or
 Down" markets (`btc-updown-5m-*`, `btc-updown-15m-*`, etc.), all running in
 **paper-trading mode only** -- no real funds, no wallet, no private key
 anywhere in this codebase yet.
@@ -10,6 +10,12 @@ anywhere in this codebase yet.
 | 1 | `bots/directional_bot.py` | Buys the favored outcome when priced $0.85-$0.99 within the final ~2 minutes before resolution |
 | 2 | `bots/oracle_bot.py` | Same as Bot 1, gated by an independent Chainlink BTC/USD freshness + stability check |
 | 3 | `bots/market_maker_bot.py` | Posts a resting bid/ask around mid price, requotes on movement, tracks long-only inventory |
+| 4 | `bots/lag_bot.py` | Estimates P(Up) from real BTC price action (driftless GBM model) and trades when it disagrees with Polymarket's own price |
+
+Bots 1-3 were paused on 2026-06-25 after testing showed none of them have
+a real information edge -- see `Strategies.txt` at the repo root for why.
+Bot 4 is the first attempt at giving a bot an actual independent signal
+instead of trusting the market's own price.
 
 ## Setup
 
@@ -32,6 +38,7 @@ public/unauthenticated for reads.
 python -m bots.directional_bot --once
 python -m bots.oracle_bot --once
 python -m bots.market_maker_bot --once
+python -m bots.lag_bot --once
 
 # continuous loop (interval from config.json -> scan_interval_seconds), Ctrl+C to stop
 python -m bots.directional_bot
@@ -43,6 +50,7 @@ Each run reads/writes its own state under `logs/` (gitignored):
 - `logs/oracle_paper_state.json` -- Bot 2's virtual balance + open positions (kept separate from Bot 1's so PnL isn't mixed between the two)
 - `logs/mm_state.json` -- Bot 3's resting quotes + inventory per market
 - `logs/oracle_state.json` -- Bot 2's last-observed BTC/USD price (for the divergence guard)
+- `logs/lag_paper_state.json` -- Bot 4's virtual balance + open positions
 - `logs/learnings.md` -- free-text notes (e.g. why a scan was skipped)
 
 Every scan also checks whether any open position/quote has resolved (see
@@ -92,6 +100,16 @@ order-book depth to fill a trade -- if a position is still unresolved after
     "max_inventory": 10.0,
     "max_inventory_per_event": 10.0,  // caps aggregate inventory across markets sharing a resolution timestamp
     "min_imbalance_to_buy": -0.2     // refuse a buy fill when the book signals selling pressure (unverified, see BUILD_INTELLIGENCE_REPORT.md Session 8)
+  },
+  "lag_bot": {
+    "min_seconds_to_resolution": 30,   // avoid the last seconds -- can't out-execute the ~2-5s blockchain confirmation delay anyway
+    "max_seconds_to_resolution": 270,  // trade mid-window, while the market is still uncertain -- NOT near resolution like Bots 1/2
+    "min_warmup_seconds": 15,          // need at least a little realized price action since window start to estimate anything
+    "vol_lookback_seconds": 120,       // how much recent BTC price history to use for the volatility estimate
+    "min_edge": 0.07,                  // only trade when model and market disagree by at least this much
+    "entry_price_range": [0.05, 0.95], // avoid markets already near-certain in either direction -- no edge left there
+    "max_bet": 2.0,
+    "max_bankroll_fraction": 0.02
   }
 }
 ```
