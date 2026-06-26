@@ -32,6 +32,19 @@ quotes aren't created once the event is already at cap, and further BUY
 fills (which increase inventory) are refused past the cap -- SELL fills
 (which reduce inventory) are never blocked, since exiting risk is always
 fine.
+
+Order-flow imbalance guard (Session 8, unverified -- see
+BUILD_INTELLIGENCE_REPORT.md). A clean paper-trading run showed this bot's
+real win rate, on fills it actually took, was only 12.4% -- the textbook
+signature of adverse selection: resting buy quotes kept getting filled
+right before price moved further against them. core/orderflow.py computes
+book imbalance (more resting size on the ask side suggests selling
+pressure / price about to drift down); `min_imbalance_to_buy` refuses a
+BUY fill when the book is signaling that pressure, on the theory that this
+is exactly the moment a static quote is most likely to be picked off.
+SELL fills are still never blocked. This is a hypothesis, not a confirmed
+fix -- needs the same before/after comparison done for the spread/timing
+tuning in Session 7.
 """
 from __future__ import annotations
 
@@ -41,7 +54,7 @@ import logging
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from core import clob_client, journal, markets as markets_module, resolution
+from core import clob_client, journal, markets as markets_module, orderflow, resolution
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 MM_STATE_PATH = Path(__file__).resolve().parent.parent / "logs" / "mm_state.json"
@@ -122,10 +135,12 @@ def check_fills(
     best_ask: float,
     cfg: dict,
     event_inventory_before_this_quote: float = 0.0,
+    imbalance: float | None = None,
 ) -> dict | None:
     """If the live book crossed our resting quote, simulate the fill."""
     quote_size = cfg["quote_size"]
     max_per_event = cfg.get("max_inventory_per_event", float("inf"))
+    min_imbalance_to_buy = cfg.get("min_imbalance_to_buy", float("-inf"))
 
     # Our ask gets hit if someone is willing to sell into the book at/below our ask
     # (i.e. the live best bid is >= our ask -- we'd be the best available buyer... )
@@ -133,7 +148,8 @@ def check_fills(
     # reaches our ask price (someone sells to us is the wrong direction for an
     # ask -- here we simulate the simpler, conservative case: our resting ask is
     # filled when the market's best bid price meets or exceeds it).
-    # SELL fills (reducing inventory) are never blocked by the event cap.
+    # SELL fills (reducing inventory) are never blocked by the event cap or
+    # the imbalance guard -- exiting risk is always allowed.
     if quote.inventory > 0 and best_bid >= quote.ask_price:
         size = min(quote_size, quote.inventory)
         quote.inventory -= size
@@ -141,10 +157,15 @@ def check_fills(
         return {"side": "ask_filled", "price": quote.ask_price, "size": size}
 
     # Our bid gets hit when the market's best ask price meets or undercuts it.
-    # BUY fills (increasing inventory) ARE blocked once the event-level cap
-    # is reached -- this is the correlated-risk guard.
+    # BUY fills (increasing inventory) ARE blocked by: the event-level cap
+    # (correlated-risk guard), and now also the order-flow imbalance guard --
+    # refuse to buy when the book signals selling pressure (more resting
+    # size on the ask side), since that's exactly when a static quote is
+    # most likely to be picked off by price continuing to move against it.
     if best_ask <= quote.bid_price:
         if event_inventory_before_this_quote + quote.inventory >= max_per_event:
+            return None
+        if imbalance is not None and imbalance < min_imbalance_to_buy:
             return None
         size = quote_size
         quote.inventory += size
@@ -273,7 +294,8 @@ def run_once(cfg: dict | None = None, state: MMState | None = None) -> list[dict
                 continue
 
             inventory_elsewhere = event_inventory(state, event_key, exclude_token_id=token_id)
-            fill = check_fills(token_id, quote, best_bid, best_ask, bot_cfg, inventory_elsewhere)
+            imbalance = orderflow.compute_imbalance(book)
+            fill = check_fills(token_id, quote, best_bid, best_ask, bot_cfg, inventory_elsewhere, imbalance)
             if fill:
                 record = journal.log_trade(
                     BOT_NAME,
@@ -282,6 +304,7 @@ def run_once(cfg: dict | None = None, state: MMState | None = None) -> list[dict
                     token_id=token_id,
                     inventory_after=quote.inventory,
                     cash_after=quote.cash,
+                    imbalance_at_fill=imbalance,
                     **fill,
                 )
                 log.info("%s/%s: %s @ %.2f size=%.2f", market.slug, outcome, fill["side"], fill["price"], fill["size"])

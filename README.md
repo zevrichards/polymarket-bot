@@ -90,7 +90,8 @@ order-book depth to fill a trade -- if a position is still unresolved after
     "target_spread": 0.10,           // widened from 0.04 after adverse selection ate the original spread
     "requote_threshold": 0.02,
     "max_inventory": 10.0,
-    "max_inventory_per_event": 10.0  // caps aggregate inventory across markets sharing a resolution timestamp
+    "max_inventory_per_event": 10.0,  // caps aggregate inventory across markets sharing a resolution timestamp
+    "min_imbalance_to_buy": -0.2     // refuse a buy fill when the book signals selling pressure (unverified, see BUILD_INTELLIGENCE_REPORT.md Session 8)
   }
 }
 ```

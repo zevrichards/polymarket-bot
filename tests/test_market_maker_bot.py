@@ -60,3 +60,34 @@ def test_check_fills_never_blocks_sell_even_at_event_cap():
     assert fill is not None
     assert fill["side"] == "ask_filled"
     assert quote.inventory == 1.0
+
+
+def test_check_fills_blocks_buy_when_book_signals_selling_pressure():
+    quote = Quote(bid_price=0.50, ask_price=0.55, inventory=0.0)
+    cfg = {"quote_size": 1.0, "min_imbalance_to_buy": -0.2}
+
+    fill = check_fills("t1", quote, best_bid=0.5, best_ask=0.40, cfg=cfg, imbalance=-0.5)
+
+    assert fill is None
+    assert quote.inventory == 0.0
+
+
+def test_check_fills_allows_buy_when_imbalance_is_fine():
+    quote = Quote(bid_price=0.50, ask_price=0.55, inventory=0.0)
+    cfg = {"quote_size": 1.0, "min_imbalance_to_buy": -0.2}
+
+    fill = check_fills("t1", quote, best_bid=0.5, best_ask=0.40, cfg=cfg, imbalance=0.1)
+
+    assert fill is not None
+    assert fill["side"] == "bid_filled"
+
+
+def test_check_fills_never_blocks_sell_regardless_of_imbalance():
+    quote = Quote(bid_price=0.50, ask_price=0.55, inventory=2.0)
+    cfg = {"quote_size": 1.0, "min_imbalance_to_buy": -0.2}
+
+    # Extremely unfavorable imbalance shouldn't matter -- this is a sell.
+    fill = check_fills("t1", quote, best_bid=0.60, best_ask=0.70, cfg=cfg, imbalance=-0.9)
+
+    assert fill is not None
+    assert fill["side"] == "ask_filled"

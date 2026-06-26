@@ -20,6 +20,7 @@
     "target_spread": 0.10,
     "requote_threshold": 0.02,
     "max_inventory": 10.0,
-    "max_inventory_per_event": 10.0
+    "max_inventory_per_event": 10.0,
+    "min_imbalance_to_buy": -0.2
   }
 }

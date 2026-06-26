@@ -210,3 +210,18 @@ A second clean run (after the spread/timing tuning above) confirmed the fix didn
 Directional/oracle's cleanest sample (11 trades each) also stayed below breakeven (54.5%/63.6% win rate against an effective ~96% breakeven requirement at their ~$0.96 average entry price) -- consistent with the very first (bug-contaminated) sample's conclusion despite three different code states.
 
 **All three bots were paused on 2026-06-25 pending a strategy rethink.** Full plain-language breakdown of what each strategy does and why it's failing is in `Strategies.txt` at the repo root -- read that before proposing or implementing any new strategy. The short version: none of the three has an independent information edge (a signal estimating true probability separately from the market's own price); they either trust the market's price outright (Bots 1/2) or assume balanced order flow that doesn't exist near resolution (Bot 3). Any new strategy needs to answer "what is the independent signal, and why would it disagree with the market in our favor" before being built.
+
+---
+
+## SESSION 8 -- First attempted real edge: order-flow imbalance for market_maker_bot (2026-06-26)
+
+After researching four candidate edges (momentum/volatility, cross-exchange lag, order-flow imbalance, calendar/event signals -- see chat for the full feasibility comparison and sources), started with order-flow imbalance since it reuses 100% of existing infrastructure (no new data source) and directly targets the adverse-selection problem already measured in Session 7.
+
+**What was built:**
+- `core/orderflow.py` -- `compute_imbalance(book)` (bid_depth - ask_depth) / total_depth, in [-1, 1]; `compute_microprice(book)` (standard volume-weighted formula, exposed but not yet wired into trading logic).
+- `bots/market_maker_bot.py`: `check_fills()` now refuses a BUY fill (inventory-increasing) when the book's imbalance is below `min_imbalance_to_buy` (config, default -0.2) -- i.e. don't buy when there's meaningfully more resting size on the ask side (selling pressure). SELL fills are still never blocked, consistent with the existing event-cap guard's philosophy: only ever restrict taking on more risk, never restrict reducing it.
+- 11 new tests (`tests/test_orderflow.py`, plus 3 added to `tests/test_market_maker_bot.py`), all fixture-based, no network.
+
+**Status: UNVERIFIED.** This is a hypothesis, not a confirmed fix, exactly like the Session 7 spread/timing tuning was before its own real-data check. The next report needs to repeat the Session 7 diagnostic (filter resolutions to only those with real inventory settled, compare real win rate and avg win/loss size before vs. after) to know whether this signal actually reduces adverse selection or just changes which fills get skipped without improving the underlying problem.
+
+**Research note for when cross-exchange-lag (option 2) gets built next:** confirmed via Chainlink's own docs that Polymarket's BTC/USD resolution feed updates only every 10-30s or on 0.5% deviation moves -- a real, structural lag vs. continuous spot prices, not speculation. Found prior art worth reviewing as reference (not copying blindly): [txbabaxyz/polyrec](https://github.com/txbabaxyz/polyrec) (open-source order-flow/imbalance dashboard for Polymarket's 15-min BTC markets, aggregating Chainlink + Binance + orderbook data) and a Medium article describing a GBM/Monte-Carlo probability model compared against Polymarket's implied odds, entering in the 240-270s window rather than last-second. Treat the article's specific backtest numbers (55-60% win rate) with the same skepticism as every other "guide" article in this project -- the mechanism is plausible and independently grounded, the claimed performance is not verified.
