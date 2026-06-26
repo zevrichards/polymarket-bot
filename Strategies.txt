@@ -1,7 +1,11 @@
 POLYMARKET BOT STRATEGIES -- WHAT THEY DO AND WHY THEY'RE LOSING
 ====================================================================
-Last updated: 2026-06-25, after paper-trading all three strategies through
-several rounds of bug fixes and a clean, contamination-free test run.
+Last updated: 2026-06-26. Bots 1-3 were paper-traded through several
+rounds of bug fixes and a clean, contamination-free test run, and were
+paused on 2026-06-25 -- none of them had a real edge (see below). Bot 4
+was added 2026-06-26 as the first attempt at giving a bot an actual
+independent signal instead of trusting the market's own price or
+assuming balanced order flow.
 
 This file is a plain-language reference for what each bot actually does,
 since the mechanics are easy to misstate casually. See
@@ -141,12 +145,60 @@ Why it's losing money (and worse than it first looked):
 
 
 --------------------------------------------------------------------
-THE COMMON THREAD
+BOT 4: LAG / PROBABILITY MODEL ("trust a real forecast, not the market")
 --------------------------------------------------------------------
 
-None of the three strategies has an actual INFORMATION EDGE -- something
-that estimates the true probability of an outcome independently of the
-market's own price.
+What it does:
+  This is the first bot built with an actual INFORMATION EDGE -- a way of
+  estimating the true probability of an outcome that doesn't just come
+  from Polymarket's own price.
+
+  Polymarket resolves these markets using a Chainlink price feed that
+  only updates every 10-30 seconds, or when price moves 0.5% -- not
+  continuously. Real exchanges (Binance, Coinbase) report price
+  continuously. That gap means there's a real, structural window where
+  the actual BTC price has already moved but the resolution-relevant
+  feed hasn't "seen" it yet.
+
+  Bot 4 pulls BTC's real price history directly from Binance (free,
+  no account needed), and asks a simple question: given how far the
+  price has already drifted from the level it needs to beat, how much
+  time is left, and how volatile BTC has actually been recently, what's
+  the real probability this resolves "Up"? It deliberately does NOT
+  assume recent momentum will continue or reverse -- there's no solid
+  evidence either way, so assuming one would just be a different unproven
+  guess. It only uses how far off-baseline the price already is, scored
+  against the remaining time and volatility.
+
+  It then compares that estimate to what Polymarket's own order book
+  implies, and only trades when the two DISAGREE by a meaningful amount
+  (7% or more). Agreeing with the market is not a signal -- the market
+  might just be right.
+
+  Important difference from Bots 1/2: this bot trades EARLIER in a
+  market's life (30 to 270 seconds before resolution, not the final
+  seconds) and specifically AVOIDS markets where the price is already
+  near $0 or $1. By the time a market is already at $0.95+, any edge is
+  already priced in -- there's nothing left to find that late.
+
+Status:
+  Unverified -- this is a new hypothesis, not a confirmed strategy.
+  Smoke-tested against live data and the math itself was checked against
+  real BTC prices (it produces sensible, non-degenerate answers), but it
+  hasn't yet accumulated a real trading sample. It also doesn't yet
+  implement everything a more careful version of this idea would want:
+  no Kelly-criterion position sizing, no per-trade stop-loss, no daily
+  trade cap, no minimum-liquidity filter -- it currently reuses the
+  same flat position sizing and correlation guards as Bots 1/2.
+
+
+--------------------------------------------------------------------
+THE COMMON THREAD (BOTS 1-3)
+--------------------------------------------------------------------
+
+None of the first three strategies has an actual INFORMATION EDGE --
+something that estimates the true probability of an outcome
+independently of the market's own price.
 
   - Bots 1/2 take the market's price at face value and bet it's slightly
     underconfident. No independent estimate of the true probability
@@ -158,12 +210,15 @@ Contrast with the weather-trading bot referenced early in this project
 (github.com/alteregoeth-ai/weatherbot): its edge was a genuine independent
 forecast (three weather data sources) compared against the market price,
 with confidence intervals calibrated per city from actual resolved
-trades. That's the structural piece missing here -- there's no equivalent
-independent signal for "what will BTC do in the next 5 minutes" built
-into any of these three bots.
+trades. That's the structural piece Bots 1-3 were missing -- there was no
+equivalent independent signal for "what will BTC do in the next 5
+minutes" built into any of them. Bot 4 is the first attempt at filling
+that gap, and Bot 3 has also since been given a partial fix in the same
+spirit (an order-flow imbalance signal that refuses to buy when the book
+is signaling selling pressure -- also unverified as of this writing).
 
 Any future strategy for this project should start by answering: what is
 the independent signal, and why would it disagree with the market's own
 price in our favor? If there's no good answer to that, the strategy is
-likely to fail the same way these three did, regardless of execution
+likely to fail the same way Bots 1-3 did, regardless of execution
 quality.

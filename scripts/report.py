@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DIRECTIONAL_STATE = ROOT / "logs" / "paper_state.json"
 ORACLE_STATE = ROOT / "logs" / "oracle_paper_state.json"
 MM_STATE = ROOT / "logs" / "mm_state.json"
+LAG_STATE = ROOT / "logs" / "lag_paper_state.json"
 
 
 def _read_balance(state_path: Path, starting_balance: float = 100.0) -> float | None:
@@ -55,6 +56,21 @@ def report_directional(bot_name: str, state_path: Path) -> None:
             print(f"    - {pos.get('market_slug')} / {pos.get('outcome')} @ {pos.get('avg_price', 0):.3f}")
 
 
+def report_lag_bot_diagnostics() -> None:
+    """Bot 4's distinguishing feature is the model-vs-market disagreement
+    it trades on -- show the average edge taken and how it broke down,
+    since that's the thing actually being tested, not just win/loss."""
+    entries = [t for t in journal.read_trades("lag_bot") if t.get("kind") == "entry"]
+    if not entries:
+        return
+    avg_edge = sum(e.get("edge", 0.0) for e in entries) / len(entries)
+    avg_model_p = sum(e.get("model_p", 0.0) for e in entries) / len(entries)
+    avg_market_p = sum(e.get("market_p", 0.0) for e in entries) / len(entries)
+    print(f"  avg model P:      {avg_model_p:.3f}")
+    print(f"  avg market P:     {avg_market_p:.3f}")
+    print(f"  avg edge taken:   {avg_edge:+.3f}")
+
+
 def report_market_maker() -> None:
     trades = journal.read_trades("market_maker_bot")
     resolutions = [t for t in trades if t.get("kind") == "resolution"]
@@ -85,6 +101,8 @@ def main() -> None:
     report_directional("directional_bot", DIRECTIONAL_STATE)
     report_directional("oracle_bot", ORACLE_STATE)
     report_market_maker()
+    report_directional("lag_bot", LAG_STATE)
+    report_lag_bot_diagnostics()
     print()
 
 
