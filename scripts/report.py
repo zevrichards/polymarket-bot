@@ -72,13 +72,32 @@ def report_lag_bot_diagnostics() -> None:
 
 
 def report_market_maker() -> None:
+    """A resolution with inventory_settled == 0 does NOT necessarily mean
+    "never filled" -- a quote can be bought into and sold back out before
+    resolution (a real, PnL-bearing round trip) and still end at exactly
+    zero inventory. Filtering on final inventory undercounts real trades
+    and was wrong in an earlier version of this report. The correct test
+    for "was this token ever actually filled" is whether any fill record
+    (kind != "resolution") exists for that token_id -- quotes that were
+    NEVER filled are the only ones that are truly riskless (cost=0,
+    payout=0, pnl=0 by construction), so excluding only those should
+    leave the "real" PnL total exactly equal to the raw total. See
+    BUILD_INTELLIGENCE_REPORT.md Sessions 7-9 for why this distinction
+    matters in the first place -- the never-filled quotes were inflating
+    the win/loss count without representing real trades."""
     trades = journal.read_trades("market_maker_bot")
     resolutions = [t for t in trades if t.get("kind") == "resolution"]
     fills = [t for t in trades if t.get("kind") != "resolution"]
+    filled_token_ids = {f["token_id"] for f in fills}
 
-    wins = sum(1 for r in resolutions if r.get("won"))
-    losses = sum(1 for r in resolutions if not r.get("won"))
-    total_pnl = sum(r.get("pnl", 0.0) for r in resolutions)
+    real = [r for r in resolutions if r["token_id"] in filled_token_ids]
+    never_filled = [r for r in resolutions if r["token_id"] not in filled_token_ids]
+
+    real_wins = [r for r in real if r.get("won")]
+    real_losses = [r for r in real if not r.get("won")]
+    real_pnl = sum(r.get("pnl", 0.0) for r in real)
+    avg_win = sum(r["pnl"] for r in real_wins) / len(real_wins) if real_wins else 0.0
+    avg_loss = sum(r["pnl"] for r in real_losses) / len(real_losses) if real_losses else 0.0
 
     open_inventory = 0.0
     open_markets = 0
@@ -91,10 +110,14 @@ def report_market_maker() -> None:
                 open_markets += 1
 
     print(f"\n=== market_maker_bot ===")
-    print(f"  fills logged:        {len(fills)}")
-    print(f"  markets resolved:    {len(resolutions)}  (W {wins} / L {losses})")
-    print(f"  realized PnL:        {'+' if total_pnl >= 0 else ''}{total_pnl:.2f}")
-    print(f"  open inventory:      {open_inventory:.2f} shares across {open_markets} market(s)")
+    print(f"  fills logged:           {len(fills)}")
+    print(f"  resolved, ever filled:  {len(real)}  (W {len(real_wins)} / L {len(real_losses)})")
+    if real:
+        print(f"  win rate (real trades): {len(real_wins) / len(real):.1%}")
+    print(f"  avg win / avg loss:     {avg_win:+.2f} / {avg_loss:+.2f}")
+    print(f"  realized PnL:           {'+' if real_pnl >= 0 else ''}{real_pnl:.2f}")
+    print(f"  never filled (excluded):{len(never_filled)} resolved quotes with zero fills, zero PnL by construction")
+    print(f"  open inventory:         {open_inventory:.2f} shares across {open_markets} market(s)")
 
 
 def main() -> None:
