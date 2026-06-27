@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -87,27 +87,47 @@ def _is_btc_market(market: BtcMarket) -> bool:
 
 
 def fetch_btc_markets(
-    max_pages: int = 10, page_size: int = 100, only_active: bool = True
+    max_pages: int = 10,
+    page_size: int = 100,
+    only_active: bool = True,
+    horizon_hours: float = 4,
 ) -> list[BtcMarket]:
     """Fetch and filter Bitcoin-resolution markets, soonest-resolving first.
 
-    Gamma's "active": true / "closed": false flags lag reality -- markets
-    whose end date is already in the past are sometimes still returned, and
-    upcoming short-duration "btc-updown-5m-<ts>" markets are pre-listed well
-    before their trading window opens. So we page through results (Gamma
-    caps each page at 100 regardless of the requested limit) and explicitly
-    filter to markets whose resolution time is still in the future, then
-    sort by soonest-resolving.
+    CONFIRMED BUG, FIXED HERE (see BUILD_INTELLIGENCE_REPORT.md Session 10):
+    the previous version paginated by "startDate" (creation time) descending
+    and filtered client-side for future end dates. That silently missed
+    markets that were *created* a while ago but are *resolving* very soon --
+    Polymarket pre-lists many markets far in advance, so a market due in the
+    next few minutes can be created hours or days before that and end up
+    buried past page 10 by all the more-recently-created, further-future
+    markets ranked ahead of it. Caught by directly comparing: a market with
+    176 seconds left to resolve existed and was tradeable, but this function
+    returned zero markets in that window at the same moment.
+
+    Fix: query Gamma directly with `end_date_min`/`end_date_max` -- this
+    asks the API to filter server-side by actual resolution time, which is
+    exactly what we want, instead of guessing from creation order. Confirmed
+    these params work via direct testing. With no explicit "order" and a
+    wide horizon, results are dominated by non-BTC markets across every
+    Polymarket category (sports, politics, etc.) and our BTC ones get
+    pushed past page 1 -- fixed by also sorting end_date ascending, so the
+    soonest-resolving markets surface first regardless of category. A
+    horizon longer than ~4 hours isn't needed since every bot in this repo
+    only acts on markets resolving in minutes, not hours.
     """
     now = datetime.now(timezone.utc)
+    horizon = now + timedelta(hours=horizon_hours)
     markets: list[BtcMarket] = []
 
     for page in range(max_pages):
         params = {
             "limit": page_size,
             "offset": page * page_size,
-            "order": "startDate",
-            "ascending": "false",
+            "end_date_min": now.isoformat(),
+            "end_date_max": horizon.isoformat(),
+            "order": "endDate",
+            "ascending": "true",
         }
         if only_active:
             params["active"] = "true"
