@@ -109,7 +109,11 @@ order-book depth to fill a trade -- if a position is still unresolved after
     "min_edge": 0.07,                  // only trade when model and market disagree by at least this much
     "entry_price_range": [0.05, 0.95], // avoid markets already near-certain in either direction -- no edge left there
     "max_bet": 2.0,
-    "max_bankroll_fraction": 0.02
+    "max_bankroll_fraction": 0.02,
+    "kelly_fraction": 0.25,          // fractional-Kelly position sizing -- bet size scales with edge size, not flat
+    "stop_loss_pct": 0.5,            // exit early if current best bid implies a loss beyond 50% of cost basis
+    "max_daily_trades": 20,          // hard cap on new entries per UTC day, regardless of qualifying candidates
+    "min_book_depth_usd": 50.0       // skip a candidate if its order book is too thin to trust
   }
 }
 ```

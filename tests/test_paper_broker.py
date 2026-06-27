@@ -99,6 +99,54 @@ def test_resolve_unknown_token_raises(tmp_path):
         broker.resolve("nonexistent", won=True)
 
 
+def test_sell_exits_position_at_best_bid(tmp_path):
+    broker = make_broker(tmp_path)
+    broker.buy("m1", "t1", "Up", 4.50, load_fixture_book())  # 5.0 shares @ 0.90
+
+    result = broker.sell("t1", load_fixture_book())  # bid = 0.85
+
+    assert result["shares"] == pytest.approx(5.0)
+    assert result["avg_exit_price"] == pytest.approx(0.85)
+    assert result["proceeds"] == pytest.approx(4.25)
+    assert result["pnl"] == pytest.approx(4.25 - 4.50)
+    assert "t1" not in broker.state.positions
+    assert broker.balance == pytest.approx(95.50 + 4.25)
+
+
+def test_sell_walks_multiple_bid_levels(tmp_path):
+    broker = make_broker(tmp_path)
+    book = SimpleNamespace(
+        asks=[SimpleNamespace(price="0.50", size="20.0")],
+        bids=[SimpleNamespace(price="0.40", size="3.0"), SimpleNamespace(price="0.30", size="10.0")],
+    )
+    broker.buy("m1", "t1", "Up", 5.0, book)  # 10.0 shares @ 0.50
+
+    result = broker.sell("t1", book)
+
+    # 3.0 @ 0.40 + 7.0 @ 0.30 = 1.20 + 2.10 = 3.30
+    assert result["shares"] == pytest.approx(10.0)
+    assert result["proceeds"] == pytest.approx(3.30)
+
+
+def test_sell_unknown_token_raises(tmp_path):
+    broker = make_broker(tmp_path)
+    with pytest.raises(KeyError):
+        broker.sell("nonexistent", load_fixture_book())
+
+
+def test_sell_raises_when_book_cannot_absorb_full_size(tmp_path):
+    broker = make_broker(tmp_path)
+    book = SimpleNamespace(
+        asks=[SimpleNamespace(price="0.50", size="20.0")],
+        bids=[SimpleNamespace(price="0.40", size="1.0")],  # not enough to sell 10 shares
+    )
+    broker.buy("m1", "t1", "Up", 5.0, book)  # 10.0 shares @ 0.50
+
+    with pytest.raises(InsufficientLiquidity):
+        broker.sell("t1", book)
+    assert "t1" in broker.state.positions  # unchanged -- sell was rejected, not partially applied
+
+
 def test_has_open_position_for_event_catches_cross_scan_correlation(tmp_path):
     # Regression test: a within-scan correlation cap isn't enough, because
     # two correlated strikes can each be the *only* candidate on separate,

@@ -33,13 +33,16 @@ def report_directional(bot_name: str, state_path: Path) -> None:
     trades = journal.read_trades(bot_name)
     entries = [t for t in trades if t.get("kind") == "entry"]
     resolutions = [t for t in trades if t.get("kind") == "resolution"]
+    stop_losses = [t for t in trades if t.get("kind") == "stop_loss_exit"]
 
-    resolved_token_ids = {r["token_id"] for r in resolutions}
-    open_positions = [e for e in entries if e["token_id"] not in resolved_token_ids]
+    closed_token_ids = {r["token_id"] for r in resolutions} | {s["token_id"] for s in stop_losses}
+    open_positions = [e for e in entries if e["token_id"] not in closed_token_ids]
 
     wins = sum(1 for r in resolutions if r.get("won"))
     losses = sum(1 for r in resolutions if not r.get("won"))
-    total_pnl = sum(r.get("pnl", 0.0) for r in resolutions)
+    resolution_pnl = sum(r.get("pnl", 0.0) for r in resolutions)
+    stop_loss_pnl = sum(s.get("pnl", 0.0) for s in stop_losses)
+    total_pnl = resolution_pnl + stop_loss_pnl
     balance = _read_balance(state_path)
 
     print(f"\n=== {bot_name} ===")
@@ -49,6 +52,8 @@ def report_directional(bot_name: str, state_path: Path) -> None:
     if resolutions:
         win_rate = wins / len(resolutions)
         print(f"  win rate:         {win_rate:.1%}")
+    if stop_losses:
+        print(f"  stop-loss exits:  {len(stop_losses)}  (pnl {'+' if stop_loss_pnl >= 0 else ''}{stop_loss_pnl:.2f})")
     print(f"  realized PnL:     {'+' if total_pnl >= 0 else ''}{total_pnl:.2f}")
     print(f"  open/unresolved:  {len(open_positions)}")
     if open_positions:

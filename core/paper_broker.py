@@ -179,6 +179,63 @@ class PaperBroker:
             "balance_after": self.state.balance,
         }
 
+    def sell(self, token_id: str, order_book) -> dict:
+        """Simulate exiting a position early (before resolution) by
+        walking the book's bid levels for the best available exit prices.
+        Used for stop-loss exits -- see bots/lag_bot.py. Sells the entire
+        position; partial exits aren't needed for that use case.
+
+        Raises KeyError if there's no open position for this token, or
+        InsufficientLiquidity if the book can't absorb the full size.
+        """
+        position = self.state.positions.get(token_id)
+        if position is None:
+            raise KeyError(f"no open position for token_id={token_id}")
+
+        bids = sorted(order_book.bids, key=lambda level: float(level.price), reverse=True)
+        remaining_shares = position.shares
+        proceeds = 0.0
+        shares_sold = 0.0
+
+        for level in bids:
+            price = float(level.price)
+            size = float(level.size)
+            if price <= 0:
+                continue
+            take = min(remaining_shares, size)
+            if take <= 0:
+                continue
+            proceeds += take * price
+            shares_sold += take
+            remaining_shares -= take
+            if remaining_shares <= 1e-9:
+                break
+
+        if remaining_shares > 1e-6:
+            raise InsufficientLiquidity(
+                f"book only supports selling {shares_sold:.2f} of {position.shares:.2f} shares"
+            )
+
+        cost_basis = position.shares * position.avg_price
+        pnl = proceeds - cost_basis
+        avg_exit_price = proceeds / shares_sold if shares_sold else 0.0
+
+        self.state.balance += proceeds
+        del self.state.positions[token_id]
+        self.save()
+
+        return {
+            "market_id": position.market_id,
+            "token_id": token_id,
+            "outcome": position.outcome,
+            "shares": shares_sold,
+            "avg_exit_price": avg_exit_price,
+            "proceeds": proceeds,
+            "cost_basis": cost_basis,
+            "pnl": pnl,
+            "balance_after": self.state.balance,
+        }
+
     def resolve(self, token_id: str, won: bool) -> dict:
         """Settle a position once its market has resolved. Pays out
         shares * $1 if won, $0 if lost, and removes the position."""
