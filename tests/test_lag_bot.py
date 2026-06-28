@@ -9,6 +9,7 @@ from bots.lag_bot import (
     book_depth_usd,
     check_stop_losses,
     count_todays_entries,
+    load_stopout_blacklist,
     size_position,
 )
 from core.paper_broker import PaperBroker, Position
@@ -71,12 +72,15 @@ def test_check_stop_losses_exits_position_beyond_threshold(tmp_path):
     cfg = {"stop_loss_pct": 0.3}  # exit if down 30%+
 
     book = make_book(bids=[(0.30, 10)], asks=[(0.35, 10)])  # down 40% from 0.50
-    with patch("bots.lag_bot.clob_client.get_order_book", return_value=book):
+    with patch("bots.lag_bot.STOPOUT_BLACKLIST_PATH", tmp_path / "blacklist.json"), \
+         patch("bots.lag_bot.clob_client.get_order_book", return_value=book):
         results = check_stop_losses(broker, cfg)
+        blacklist = load_stopout_blacklist()
 
     assert len(results) == 1
     assert "t1" not in broker.state.positions
     assert results[0]["pnl"] < 0
+    assert "m1" in blacklist  # regression test: don't immediately re-buy into the same move
 
 
 def test_check_stop_losses_leaves_position_under_threshold(tmp_path):
@@ -87,7 +91,8 @@ def test_check_stop_losses_leaves_position_under_threshold(tmp_path):
     cfg = {"stop_loss_pct": 0.3}
 
     book = make_book(bids=[(0.45, 10)], asks=[(0.50, 10)])  # only down 10%
-    with patch("bots.lag_bot.clob_client.get_order_book", return_value=book):
+    with patch("bots.lag_bot.STOPOUT_BLACKLIST_PATH", tmp_path / "blacklist.json"), \
+         patch("bots.lag_bot.clob_client.get_order_book", return_value=book):
         results = check_stop_losses(broker, cfg)
 
     assert results == []

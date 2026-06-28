@@ -57,6 +57,7 @@ from core.paper_broker import InsufficientBalance, InsufficientLiquidity, PaperB
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 LAG_BROKER_STATE_PATH = Path(__file__).resolve().parent.parent / "logs" / "lag_paper_state.json"
+STOPOUT_BLACKLIST_PATH = Path(__file__).resolve().parent.parent / "logs" / "lag_stopout_blacklist.json"
 BOT_NAME = "lag_bot"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -207,15 +208,42 @@ def count_todays_entries(bot_name: str) -> int:
     return count
 
 
+def load_stopout_blacklist() -> set[str]:
+    if STOPOUT_BLACKLIST_PATH.exists():
+        with STOPOUT_BLACKLIST_PATH.open(encoding="utf-8") as f:
+            return set(json.load(f))
+    return set()
+
+
+def save_stopout_blacklist(blacklist: set[str]) -> None:
+    STOPOUT_BLACKLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with STOPOUT_BLACKLIST_PATH.open("w", encoding="utf-8") as f:
+        json.dump(sorted(blacklist), f)
+
+
 def check_stop_losses(broker: PaperBroker, cfg: dict) -> list[dict]:
     """Exit positions early if the current best bid implies a loss beyond
     stop_loss_pct of cost basis -- without this, a position is locked in
-    until resolution no matter how far the price moves against it."""
+    until resolution no matter how far the price moves against it.
+
+    Also blacklists the market_id from re-entry. Without this, a market
+    we just got stopped out of immediately becomes eligible again on the
+    very next scan (the only thing blocking re-entry was the open
+    position itself, which the stop-loss just closed) -- caught in
+    practice as a real bug: one market triggered two separate stop-losses
+    a minute apart because the bot re-bought into the exact same adverse
+    move it had just been stopped out of. The blacklist is permanent
+    (not time-limited) since these markets resolve and stop appearing in
+    fetch_btc_markets() within minutes anyway, so there's no real cost to
+    never reconsidering one once it's gone.
+    """
     stop_loss_pct = cfg.get("stop_loss_pct")
     if not stop_loss_pct:
         return []
 
     results = []
+    blacklist = load_stopout_blacklist()
+
     for token_id, position in list(broker.state.positions.items()):
         try:
             book = clob_client.get_order_book(token_id)
@@ -236,13 +264,18 @@ def check_stop_losses(broker: PaperBroker, cfg: dict) -> list[dict]:
             log.warning("stop-loss sell failed for %s: %s", token_id[:12], exc)
             continue
 
+        blacklist.add(position.market_id)
+
         record = journal.log_trade(BOT_NAME, kind="stop_loss_exit", **result)
         log.info(
-            "STOP-LOSS exit %s %s @ %.3f | loss=%.1f%% pnl=%+.2f",
+            "STOP-LOSS exit %s %s @ %.3f | loss=%.1f%% pnl=%+.2f (market blacklisted from re-entry)",
             result["market_id"], result["outcome"], result["avg_exit_price"],
             loss_frac * 100, result["pnl"],
         )
         results.append(record)
+
+    if results:
+        save_stopout_blacklist(blacklist)
 
     return results
 
@@ -278,12 +311,15 @@ def run_once(cfg: dict | None = None, broker: PaperBroker | None = None) -> list
 
     max_daily_trades = bot_cfg.get("max_daily_trades")
     trades_today = count_todays_entries(BOT_NAME) if max_daily_trades else 0
+    stopout_blacklist = load_stopout_blacklist()
 
     fills = []
     for market in btc_markets:
         if max_daily_trades and trades_today + len(fills) >= max_daily_trades:
             log.info("daily trade cap (%d) reached, skipping remaining candidates", max_daily_trades)
             break
+        if market.market_id in stopout_blacklist:
+            continue  # just stopped out of this market -- don't immediately buy back into the same move
         if broker.has_open_position_for_market(market.market_id):
             continue
         if market.end_date and broker.has_open_position_for_event(market.end_date.isoformat()):
