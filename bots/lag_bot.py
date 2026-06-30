@@ -424,19 +424,26 @@ def run_loop(cfg: dict | None = None) -> None:
 
     try:
         while True:
-            now = time.time()
-            if now - last_refresh >= bot_cfg["refresh_interval_seconds"]:
-                tracked, subscribed = _refresh(bot_cfg, ws_book, broker, subscribed)
-                last_refresh = now
-
             try:
-                recent_prices = binance_client.get_recent_prices(bot_cfg["vol_lookback_seconds"])
-            except Exception as exc:
-                log.warning("Binance price fetch failed, skipping tick: %s", exc)
-                time.sleep(bot_cfg["tick_interval_seconds"])
-                continue
+                now = time.time()
+                if now - last_refresh >= bot_cfg["refresh_interval_seconds"]:
+                    tracked, subscribed = _refresh(bot_cfg, ws_book, broker, subscribed)
+                    last_refresh = now
 
-            tick(cfg, ws_book, broker, tracked, recent_prices, edge_history)
+                recent_prices = binance_client.get_recent_prices(bot_cfg["vol_lookback_seconds"])
+                tick(cfg, ws_book, broker, tracked, recent_prices, edge_history)
+            except KeyboardInterrupt:
+                raise
+            except Exception:
+                # Session 16: a single uncaught exception here (e.g. a
+                # transient Gamma 403/timeout) used to kill the entire
+                # process -- this loop had no equivalent of
+                # core/scheduler.py's catch-log-retry resilience that the
+                # older bots get for free. Confirmed live: an unhandled
+                # 403 silently terminated this bot for an extended period
+                # before anyone noticed the report had gone stale.
+                log.exception("%s: tick failed, will retry next interval", BOT_NAME)
+
             time.sleep(bot_cfg["tick_interval_seconds"])
     except KeyboardInterrupt:
         log.info("%s: shutting down", BOT_NAME)

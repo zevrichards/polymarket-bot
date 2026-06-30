@@ -115,10 +115,21 @@ def fetch_btc_markets(
     soonest-resolving markets surface first regardless of category. A
     horizon longer than ~4 hours isn't needed since every bot in this repo
     only acts on markets resolving in minutes, not hours.
+
+    Session 16 fix: this used to always page through all `max_pages`
+    (1000 results) on every call, even though BTC markets consistently
+    cluster in the first page or two (sorted soonest-first). With two
+    bots both calling this every ~20s for 30+ minutes, that's a lot of
+    unnecessary request volume -- almost certainly what triggered a
+    Gamma 403 in practice. Now stops early once a full page passes with
+    zero new BTC matches after at least one match has been found --
+    we've moved past the cluster, no need to keep scanning sports/politics
+    markets for the rest of the 4-hour horizon.
     """
     now = datetime.now(timezone.utc)
     horizon = now + timedelta(hours=horizon_hours)
     markets: list[BtcMarket] = []
+    found_any = False
 
     for page in range(max_pages):
         params = {
@@ -139,6 +150,7 @@ def fetch_btc_markets(
         if not raw_markets:
             break
 
+        page_had_match = False
         for raw in raw_markets:
             market = _parse_market(raw)
             if not market or not _is_btc_market(market):
@@ -146,6 +158,12 @@ def fetch_btc_markets(
             seconds_left = market.seconds_to_resolution(now)
             if seconds_left is not None and seconds_left > 0:
                 markets.append(market)
+                page_had_match = True
+
+        if page_had_match:
+            found_any = True
+        elif found_any:
+            break  # past the BTC cluster -- no need to keep paginating
 
     markets.sort(key=lambda m: m.seconds_to_resolution(now) or float("inf"))
     return markets

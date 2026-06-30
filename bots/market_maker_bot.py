@@ -292,14 +292,25 @@ def run_loop(cfg: dict | None = None) -> None:
 
     try:
         while True:
-            now = time.time()
-            if now - last_refresh >= bot_cfg["refresh_interval_seconds"]:
-                tracked = _refresh_tracked(bot_cfg, ws_book, state, tracked)
-                last_refresh = now
+            try:
+                now = time.time()
+                if now - last_refresh >= bot_cfg["refresh_interval_seconds"]:
+                    tracked = _refresh_tracked(bot_cfg, ws_book, state, tracked)
+                    last_refresh = now
 
-            events = tick(cfg, ws_book, state, tracked, mid_history)
-            if events:
-                save_state(state)
+                events = tick(cfg, ws_book, state, tracked, mid_history)
+                if events:
+                    save_state(state)
+            except KeyboardInterrupt:
+                raise
+            except Exception:
+                # Session 16: this loop had no equivalent of
+                # core/scheduler.py's catch-log-retry resilience -- a
+                # single uncaught exception (e.g. a transient Gamma
+                # 403/timeout) would silently kill the entire process.
+                # Confirmed live in lag_bot's identical gap; fixed here too
+                # since this loop has the exact same structure.
+                log.exception("%s: tick failed, will retry next interval", BOT_NAME)
 
             time.sleep(bot_cfg["tick_interval_seconds"])
     except KeyboardInterrupt:
