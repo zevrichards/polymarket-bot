@@ -4,6 +4,8 @@ network connection."""
 import json
 import time
 
+import pytest
+
 from core.live_orderbook import LiveOrderBook
 
 
@@ -118,3 +120,84 @@ def test_unsubscribe_clears_tracked_state():
 
     assert "t1" not in book._subscribed
     assert book.best_bid_ask("t1") == (None, None)
+
+
+def test_book_event_populates_depth():
+    book = LiveOrderBook()
+    message = json.dumps([{
+        "event_type": "book",
+        "asset_id": "t1",
+        "bids": [{"price": "0.45", "size": "100"}, {"price": "0.40", "size": "50"}],
+        "asks": [{"price": "0.55", "size": "100"}, {"price": "0.60", "size": "50"}],
+    }])
+
+    book._on_message(None, message)
+
+    # bids: 0.45*100 + 0.40*50 = 65.0 | asks: 0.55*100 + 0.60*50 = 85.0
+    assert book.depth_usd("t1") == pytest.approx(150.0)
+
+
+def test_depth_usd_none_when_no_book_event_received():
+    book = LiveOrderBook()
+    assert book.depth_usd("never-seen") is None
+
+
+def test_depth_usd_not_updated_by_price_change_events():
+    # price_change deltas don't carry full depth -- depth should remain
+    # whatever the last "book" snapshot said, not be wiped or guessed at.
+    book = LiveOrderBook()
+    book_message = json.dumps([{
+        "event_type": "book", "asset_id": "t1",
+        "bids": [{"price": "0.45", "size": "100"}],
+        "asks": [{"price": "0.55", "size": "100"}],
+    }])
+    book._on_message(None, book_message)
+
+    price_change_message = json.dumps({
+        "event_type": "price_change",
+        "price_changes": [{"asset_id": "t1", "best_bid": "0.46", "best_ask": "0.54"}],
+    })
+    book._on_message(None, price_change_message)
+
+    assert book.depth_usd("t1") == pytest.approx(0.45 * 100 + 0.55 * 100)
+    assert book.best_bid_ask("t1") == (0.46, 0.54)  # best_bid_ask DOES update on price_change
+
+
+def test_depth_usd_stale_returns_none():
+    book = LiveOrderBook()
+    with book._lock:
+        book._depth["t1"] = {"bids": [(0.45, 100)], "asks": [(0.55, 100)], "updated_at": time.time() - 120}
+
+    assert book.depth_usd("t1", max_age_seconds=60.0) is None
+
+
+def test_get_book_returns_paper_broker_compatible_shape():
+    book = LiveOrderBook()
+    message = json.dumps([{
+        "event_type": "book", "asset_id": "t1",
+        "bids": [{"price": "0.45", "size": "100"}],
+        "asks": [{"price": "0.55", "size": "100"}],
+    }])
+    book._on_message(None, message)
+
+    result = book.get_book("t1")
+
+    assert float(result.bids[0].price) == 0.45
+    assert float(result.bids[0].size) == 100
+    assert float(result.asks[0].price) == 0.55
+
+
+def test_get_book_none_when_no_snapshot():
+    book = LiveOrderBook()
+    assert book.get_book("never-seen") is None
+
+
+def test_unsubscribe_clears_depth_too():
+    book = LiveOrderBook()
+    with book._lock:
+        book._depth["t1"] = {"bids": [(0.45, 100)], "asks": [(0.55, 100)], "updated_at": time.time()}
+    book.subscribe(["t1"])
+
+    book.unsubscribe(["t1"])
+
+    assert book.depth_usd("t1") is None

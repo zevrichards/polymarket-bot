@@ -50,6 +50,11 @@ class LiveOrderBook:
         self.ws_url = ws_url
         self._lock = threading.Lock()
         self._best: dict[str, dict] = {}  # token_id -> {"bid": float, "ask": float, "updated_at": float}
+        self._depth: dict[str, dict] = {}  # token_id -> {"bids": [(price,size),...], "asks": [...], "updated_at": float}
+        # _depth only updates on "book" events (full snapshots), not on
+        # "price_change" deltas -- those only carry best_bid/best_ask, not
+        # the rest of the book. So depth can be staler than best_bid_ask;
+        # fine for a liquidity sanity check, not fine for fill pricing.
         self._subscribed: set[str] = set()
         self._ws: websocket.WebSocketApp | None = None
         self._thread: threading.Thread | None = None
@@ -89,6 +94,7 @@ class LiveOrderBook:
         with self._lock:
             for tid in ids:
                 self._best.pop(tid, None)
+                self._depth.pop(tid, None)
         if self._ws is not None:
             try:
                 self._ws.send(json.dumps({"operation": "unsubscribe", "assets_ids": ids}))
@@ -106,6 +112,37 @@ class LiveOrderBook:
         if time.time() - entry["updated_at"] > max_age_seconds:
             return None, None
         return entry["bid"], entry["ask"]
+
+    def get_book(self, token_id: str, max_age_seconds: float = 60.0):
+        """Returns an object shaped like py_clob_client's OrderBookSummary
+        (`.bids`/`.asks`, each a list of objects with `.price`/`.size`) so
+        it can be passed directly into PaperBroker.buy()/sell() exactly
+        like a REST-fetched book. None if we have no snapshot yet or it's
+        stale."""
+        with self._lock:
+            entry = self._depth.get(token_id)
+        if entry is None:
+            return None
+        if time.time() - entry["updated_at"] > max_age_seconds:
+            return None
+
+        from types import SimpleNamespace
+
+        bids = [SimpleNamespace(price=str(p), size=str(s)) for p, s in entry["bids"]]
+        asks = [SimpleNamespace(price=str(p), size=str(s)) for p, s in entry["asks"]]
+        return SimpleNamespace(bids=bids, asks=asks)
+
+    def depth_usd(self, token_id: str, max_age_seconds: float = 60.0) -> float | None:
+        """Total notional resting on both sides of the last known full book
+        snapshot for this token, or None if we don't have one yet (e.g. no
+        "book" event received since subscribing) or it's gone stale."""
+        with self._lock:
+            entry = self._depth.get(token_id)
+        if entry is None:
+            return None
+        if time.time() - entry["updated_at"] > max_age_seconds:
+            return None
+        return sum(p * s for p, s in entry["bids"]) + sum(p * s for p, s in entry["asks"])
 
     def _run_forever(self) -> None:
         while not self._stop_requested:
@@ -151,6 +188,11 @@ class LiveOrderBook:
                 best_bid = max(float(level["price"]) for level in bids)
                 best_ask = min(float(level["price"]) for level in asks)
                 self._update_best(asset_id, best_bid, best_ask, now)
+
+                bid_pairs = [(float(level["price"]), float(level["size"])) for level in bids]
+                ask_pairs = [(float(level["price"]), float(level["size"])) for level in asks]
+                with self._lock:
+                    self._depth[asset_id] = {"bids": bid_pairs, "asks": ask_pairs, "updated_at": now}
 
             elif event_type == "price_change":
                 for change in event.get("price_changes", []):

@@ -41,6 +41,9 @@
     "kelly_fraction": 0.25,
     "stop_loss_pct": 0.5,
     "max_daily_trades": 20,
-    "min_book_depth_usd": 50.0
+    "min_book_depth_usd": 50.0,
+    "refresh_interval_seconds": 20,
+    "tick_interval_seconds": 3,
+    "min_consecutive_ticks": 3
   }
 }
