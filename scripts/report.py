@@ -30,6 +30,16 @@ def _read_balance(state_path: Path, starting_balance: float = 100.0) -> float | 
 
 
 def report_directional(bot_name: str, state_path: Path) -> None:
+    """A trade closed via stop-loss is a real loss, full stop -- it must
+    never be left out of the win/loss tally. An earlier version of this
+    report only counted kind="resolution" records toward win rate, which
+    excludes every stop-loss exit. Since a stop-loss only ever fires on a
+    position that's already losing, that undercounting isn't neutral: it
+    disproportionately removes likely losers from the sample, inflating
+    the reported win rate. Concretely this showed lag_bot at 88.4% "win
+    rate" when the true figure (every closed trade, stop-losses counted
+    as the losses they are) was 64.4% -- still solidly profitable, but a
+    very different number. See BUILD_INTELLIGENCE_REPORT.md Session 13."""
     trades = journal.read_trades(bot_name)
     entries = [t for t in trades if t.get("kind") == "entry"]
     resolutions = [t for t in trades if t.get("kind") == "resolution"]
@@ -38,20 +48,27 @@ def report_directional(bot_name: str, state_path: Path) -> None:
     closed_token_ids = {r["token_id"] for r in resolutions} | {s["token_id"] for s in stop_losses}
     open_positions = [e for e in entries if e["token_id"] not in closed_token_ids]
 
-    wins = sum(1 for r in resolutions if r.get("won"))
-    losses = sum(1 for r in resolutions if not r.get("won"))
+    resolved_wins = sum(1 for r in resolutions if r.get("won"))
+    resolved_losses = sum(1 for r in resolutions if not r.get("won"))
     resolution_pnl = sum(r.get("pnl", 0.0) for r in resolutions)
     stop_loss_pnl = sum(s.get("pnl", 0.0) for s in stop_losses)
     total_pnl = resolution_pnl + stop_loss_pnl
     balance = _read_balance(state_path)
 
+    # True win rate across every closed trade -- a stop-loss exit is never
+    # a win, by construction (you only stop out of a position that's down).
+    true_wins = resolved_wins
+    true_losses = resolved_losses + len(stop_losses)
+    total_closed = true_wins + true_losses
+
     print(f"\n=== {bot_name} ===")
     print(f"  balance:          {'$%.2f' % balance if balance is not None else 'n/a (no state file yet)'}")
     print(f"  entries logged:   {len(entries)}")
-    print(f"  resolved:         {len(resolutions)}  (W {wins} / L {losses})")
+    print(f"  closed trades:    {total_closed}  (resolved {len(resolutions)} + stopped-out {len(stop_losses)})")
+    if total_closed:
+        print(f"  TRUE win rate:    {true_wins} W / {true_losses} L = {true_wins / total_closed:.1%}")
     if resolutions:
-        win_rate = wins / len(resolutions)
-        print(f"  win rate:         {win_rate:.1%}")
+        print(f"    (resolved-only: {resolved_wins} W / {resolved_losses} L = {resolved_wins / len(resolutions):.1%} -- excludes stop-losses, don't use this as the headline number)")
     if stop_losses:
         print(f"  stop-loss exits:  {len(stop_losses)}  (pnl {'+' if stop_loss_pnl >= 0 else ''}{stop_loss_pnl:.2f})")
     print(f"  realized PnL:     {'+' if total_pnl >= 0 else ''}{total_pnl:.2f}")
