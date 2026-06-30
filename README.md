@@ -9,13 +9,16 @@ anywhere in this codebase yet.
 |---|---|---|
 | 1 | `bots/directional_bot.py` | Buys the favored outcome when priced $0.85-$0.99 within the final ~2 minutes before resolution |
 | 2 | `bots/oracle_bot.py` | Same as Bot 1, gated by an independent Chainlink BTC/USD freshness + stability check |
-| 3 | `bots/market_maker_bot.py` | Posts a resting bid/ask around mid price, requotes on movement, tracks long-only inventory |
+| 3 | `bots/market_maker_bot.py` | Real-time (WebSocket) Avellaneda-Stoikov market maker -- inventory-skewed, volatility/time-scaled quotes, narrowed to the 2 soonest-resolving markets |
 | 4 | `bots/lag_bot.py` | Estimates P(Up) from real BTC price action (driftless GBM model) and trades when it disagrees with Polymarket's own price |
 
-Bots 1-3 were paused on 2026-06-25 after testing showed none of them have
-a real information edge -- see `Strategies.txt` at the repo root for why.
-Bot 4 is the first attempt at giving a bot an actual independent signal
-instead of trusting the market's own price.
+Bots 1/2 were paused on 2026-06-25 after testing showed neither has a real
+information edge -- see `Strategies.txt` at the repo root for why. Bot 3
+was fully rewritten in Session 14 after its original REST-polling version
+lost money across a large sample -- see `BUILD_INTELLIGENCE_REPORT.md`
+Session 14. Bot 4 is the first bot with an actual independent signal
+instead of trusting the market's own price, and the first one with a
+genuinely positive (if still early) result.
 
 ## Setup
 
@@ -94,12 +97,18 @@ order-book depth to fill a trade -- if a position is still unresolved after
     "chainlink_feed_address": "0xc907E116054Ad103354f2D350FD2514433D57F6f"  // BTC/USD on Polygon
   },
   "market_maker_bot": {
+    "max_tracked_markets": 2,        // narrowed scope -- the old version tracked 40-90 markets, which is why a REST-polling cycle took 60+ seconds
+    "min_seconds_to_resolution": 20,
+    "max_seconds_to_resolution": 280,
+    "refresh_interval_seconds": 20,  // how often to re-pick which markets to track
+    "tick_interval_seconds": 1,      // how often to recompute quotes/check fills against the live WebSocket book
+    "vol_lookback_ticks": 30,        // rolling window of recent mid-price ticks used for the volatility estimate
+    "gamma": 2.0,                    // Avellaneda-Stoikov risk aversion -- higher = more aggressive inventory skewing/widening
+    "k": 50.0,                       // AS liquidity parameter (baseline spread term) -- see core/marketmaking.py
+    "min_spread": 0.02,              // spread floor, regardless of what the AS formula computes
     "quote_size": 1.0,
-    "target_spread": 0.10,           // widened from 0.04 after adverse selection ate the original spread
-    "requote_threshold": 0.02,
-    "max_inventory": 10.0,
-    "max_inventory_per_event": 10.0,  // caps aggregate inventory across markets sharing a resolution timestamp
-    "min_imbalance_to_buy": -0.2     // refuse a buy fill when the book signals selling pressure (unverified, see BUILD_INTELLIGENCE_REPORT.md Session 8)
+    "max_inventory": 10.0,           // hard cap, enforced directly in check_fill() -- not just via pricing-model inventory clamping (see Session 14)
+    "max_inventory_per_event": 10.0  // caps aggregate inventory across markets sharing a resolution timestamp
   },
   "lag_bot": {
     "min_seconds_to_resolution": 30,   // avoid the last seconds -- can't out-execute the ~2-5s blockchain confirmation delay anyway

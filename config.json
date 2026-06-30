@@ -16,12 +16,18 @@
     "chainlink_feed_address": "0xc907E116054Ad103354f2D350FD2514433D57F6f"
   },
   "market_maker_bot": {
+    "max_tracked_markets": 2,
+    "min_seconds_to_resolution": 20,
+    "max_seconds_to_resolution": 280,
+    "refresh_interval_seconds": 20,
+    "tick_interval_seconds": 1,
+    "vol_lookback_ticks": 30,
+    "gamma": 2.0,
+    "k": 50.0,
+    "min_spread": 0.02,
     "quote_size": 1.0,
-    "target_spread": 0.10,
-    "requote_threshold": 0.02,
     "max_inventory": 10.0,
-    "max_inventory_per_event": 10.0,
-    "min_imbalance_to_buy": -0.2
+    "max_inventory_per_event": 10.0
   },
   "lag_bot": {
     "min_seconds_to_resolution": 30,

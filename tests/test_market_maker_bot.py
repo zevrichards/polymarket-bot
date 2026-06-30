@@ -1,18 +1,17 @@
-"""Market-maker correlated-event inventory cap -- no network calls."""
-from types import SimpleNamespace
+"""Market-maker v2 (real-time rewrite): correlated-event inventory cap
+and fill logic -- no network calls."""
+from bots.market_maker_bot import MMState, Position, check_fill, event_inventory
 
-from bots.market_maker_bot import MMState, Quote, check_fills, event_inventory
 
-
-def make_state(quotes: dict) -> MMState:
-    return MMState(quotes=quotes)
+def make_state(positions: dict) -> MMState:
+    return MMState(positions=positions)
 
 
 def test_event_inventory_sums_across_correlated_markets():
     state = make_state({
-        "t1": Quote(bid_price=0.4, ask_price=0.5, inventory=3.0, event_key="2026-06-25T16:00:00+00:00"),
-        "t2": Quote(bid_price=0.4, ask_price=0.5, inventory=2.0, event_key="2026-06-25T16:00:00+00:00"),
-        "t3": Quote(bid_price=0.4, ask_price=0.5, inventory=5.0, event_key="2026-06-25T17:00:00+00:00"),
+        "t1": Position(market_id="m1", outcome="Up", event_key="2026-06-25T16:00:00+00:00", inventory=3.0),
+        "t2": Position(market_id="m2", outcome="Up", event_key="2026-06-25T16:00:00+00:00", inventory=2.0),
+        "t3": Position(market_id="m3", outcome="Up", event_key="2026-06-25T17:00:00+00:00", inventory=5.0),
     })
     assert event_inventory(state, "2026-06-25T16:00:00+00:00") == 5.0
     assert event_inventory(state, "2026-06-25T17:00:00+00:00") == 5.0
@@ -21,73 +20,92 @@ def test_event_inventory_sums_across_correlated_markets():
 
 def test_event_inventory_excludes_given_token():
     state = make_state({
-        "t1": Quote(bid_price=0.4, ask_price=0.5, inventory=3.0, event_key="e1"),
-        "t2": Quote(bid_price=0.4, ask_price=0.5, inventory=2.0, event_key="e1"),
+        "t1": Position(market_id="m1", outcome="Up", event_key="e1", inventory=3.0),
+        "t2": Position(market_id="m2", outcome="Up", event_key="e1", inventory=2.0),
     })
     assert event_inventory(state, "e1", exclude_token_id="t1") == 2.0
 
 
-def test_check_fills_blocks_buy_once_event_cap_reached():
-    quote = Quote(bid_price=0.50, ask_price=0.55, inventory=0.0, event_key="e1")
-    cfg = {"quote_size": 1.0, "max_inventory_per_event": 5.0}
+def test_check_fill_blocks_buy_once_event_cap_reached():
+    pos = Position(market_id="m1", outcome="Up", event_key="e1", inventory=0.0)
 
     # Other markets in this event already hold 5.0 -- at cap.
-    fill = check_fills("t1", quote, best_bid=0.5, best_ask=0.40, cfg=cfg, event_inventory_before_this_quote=5.0)
+    fill = check_fill(pos, live_bid=0.5, live_ask=0.40, our_bid=0.45, our_ask=0.55,
+                       quote_size=1.0, max_per_event=5.0, event_inventory_elsewhere=5.0)
 
     assert fill is None
-    assert quote.inventory == 0.0  # unchanged -- buy was refused
+    assert pos.inventory == 0.0  # unchanged -- buy was refused
 
 
-def test_check_fills_allows_buy_under_event_cap():
-    quote = Quote(bid_price=0.50, ask_price=0.55, inventory=0.0, event_key="e1")
-    cfg = {"quote_size": 1.0, "max_inventory_per_event": 5.0}
+def test_check_fill_allows_buy_under_event_cap():
+    pos = Position(market_id="m1", outcome="Up", event_key="e1", inventory=0.0)
 
-    fill = check_fills("t1", quote, best_bid=0.5, best_ask=0.40, cfg=cfg, event_inventory_before_this_quote=2.0)
+    fill = check_fill(pos, live_bid=0.5, live_ask=0.40, our_bid=0.45, our_ask=0.55,
+                       quote_size=1.0, max_per_event=5.0, event_inventory_elsewhere=2.0)
 
     assert fill is not None
     assert fill["side"] == "bid_filled"
-    assert quote.inventory == 1.0
+    assert pos.inventory == 1.0
+    assert pos.cash == -0.45
 
 
-def test_check_fills_never_blocks_sell_even_at_event_cap():
+def test_check_fill_never_blocks_sell_even_at_event_cap():
     # Reducing inventory (ask_filled) must always be allowed, regardless of
     # the event cap -- exiting risk should never be refused.
-    quote = Quote(bid_price=0.50, ask_price=0.55, inventory=2.0, event_key="e1")
-    cfg = {"quote_size": 1.0, "max_inventory_per_event": 0.0}  # cap already exceeded
+    pos = Position(market_id="m1", outcome="Up", event_key="e1", inventory=2.0)
 
-    fill = check_fills("t1", quote, best_bid=0.60, best_ask=0.70, cfg=cfg, event_inventory_before_this_quote=10.0)
+    fill = check_fill(pos, live_bid=0.60, live_ask=0.70, our_bid=0.55, our_ask=0.58,
+                       quote_size=1.0, max_per_event=0.0, event_inventory_elsewhere=10.0)
 
     assert fill is not None
     assert fill["side"] == "ask_filled"
-    assert quote.inventory == 1.0
+    assert pos.inventory == 1.0
 
 
-def test_check_fills_blocks_buy_when_book_signals_selling_pressure():
-    quote = Quote(bid_price=0.50, ask_price=0.55, inventory=0.0)
-    cfg = {"quote_size": 1.0, "min_imbalance_to_buy": -0.2}
+def test_check_fill_no_cross_returns_none():
+    pos = Position(market_id="m1", outcome="Up", event_key="e1", inventory=0.0)
 
-    fill = check_fills("t1", quote, best_bid=0.5, best_ask=0.40, cfg=cfg, imbalance=-0.5)
+    # Live market hasn't touched either side of our quote.
+    fill = check_fill(pos, live_bid=0.48, live_ask=0.52, our_bid=0.45, our_ask=0.55,
+                       quote_size=1.0, max_per_event=10.0, event_inventory_elsewhere=0.0)
 
     assert fill is None
-    assert quote.inventory == 0.0
+    assert pos.inventory == 0.0
 
 
-def test_check_fills_allows_buy_when_imbalance_is_fine():
-    quote = Quote(bid_price=0.50, ask_price=0.55, inventory=0.0)
-    cfg = {"quote_size": 1.0, "min_imbalance_to_buy": -0.2}
+def test_check_fill_blocks_buy_once_max_inventory_reached():
+    # Regression test for the Session 14 live bug: when the AS pricing
+    # math degrades to a near-mid fallback quote (e.g. volatility spikes
+    # near a price boundary), nothing in the pricing itself reliably
+    # stops repeated fills -- this is the hard cap that doesn't depend on
+    # the pricing model behaving correctly. live_bid kept below our_ask so
+    # only the buy side is ever in play here.
+    pos = Position(market_id="m1", outcome="Up", event_key="e1", inventory=10.0)
 
-    fill = check_fills("t1", quote, best_bid=0.5, best_ask=0.40, cfg=cfg, imbalance=0.1)
+    fill = check_fill(pos, live_bid=0.005, live_ask=0.01, our_bid=0.01, our_ask=0.02,
+                       quote_size=1.0, max_per_event=100.0, event_inventory_elsewhere=0.0,
+                       max_inventory=10.0)
+
+    assert fill is None
+    assert pos.inventory == 10.0  # unchanged -- buy was refused by the inventory cap
+
+
+def test_check_fill_allows_buy_just_under_max_inventory():
+    pos = Position(market_id="m1", outcome="Up", event_key="e1", inventory=9.0)
+
+    fill = check_fill(pos, live_bid=0.005, live_ask=0.01, our_bid=0.01, our_ask=0.02,
+                       quote_size=1.0, max_per_event=100.0, event_inventory_elsewhere=0.0,
+                       max_inventory=10.0)
 
     assert fill is not None
-    assert fill["side"] == "bid_filled"
+    assert pos.inventory == 10.0
 
 
-def test_check_fills_never_blocks_sell_regardless_of_imbalance():
-    quote = Quote(bid_price=0.50, ask_price=0.55, inventory=2.0)
-    cfg = {"quote_size": 1.0, "min_imbalance_to_buy": -0.2}
+def test_check_fill_ask_only_fills_up_to_held_inventory():
+    pos = Position(market_id="m1", outcome="Up", event_key="e1", inventory=0.5)
 
-    # Extremely unfavorable imbalance shouldn't matter -- this is a sell.
-    fill = check_fills("t1", quote, best_bid=0.60, best_ask=0.70, cfg=cfg, imbalance=-0.9)
+    fill = check_fill(pos, live_bid=0.60, live_ask=0.70, our_bid=0.55, our_ask=0.58,
+                       quote_size=1.0, max_per_event=10.0, event_inventory_elsewhere=0.0)
 
-    assert fill is not None
-    assert fill["side"] == "ask_filled"
+    assert fill["size"] == 0.5  # capped at what we actually hold
+    assert pos.inventory == 0.0
