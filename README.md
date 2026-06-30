@@ -121,11 +121,11 @@ order-book depth to fill a trade -- if a position is still unresolved after
     "max_bankroll_fraction": 0.02,
     "kelly_fraction": 0.25,          // fractional-Kelly position sizing -- bet size scales with edge size, not flat
     "stop_loss_pct": 0.5,            // exit early if current best bid implies a loss beyond 50% of cost basis
-    "max_daily_trades": 20,          // hard cap on new entries per UTC day, regardless of qualifying candidates
+    "max_daily_trades": null,        // TEMPORARILY DISABLED (2026-06-30) -- was a circuit-breaker cap, not a primary risk control (Kelly sizing + stop-loss already bound per-trade/ongoing risk); set to a number to re-enable
     "min_book_depth_usd": 50.0,      // skip a candidate if its order book is too thin to trust
     "refresh_interval_seconds": 20,  // how often to re-pick which markets to track (REST market discovery)
     "tick_interval_seconds": 3,      // how often to recompute the model-vs-market edge against the live WebSocket price
-    "min_consecutive_ticks": 3       // require the edge to persist this many ticks before trading -- filters single-tick noise/flicker
+    "min_consecutive_ticks": 1       // TEMPORARILY DISABLED (2026-06-30) -- trades on the first qualifying tick again, no persistence wait; set >1 to require the edge to hold across multiple ticks before trading
   }
 }
 ```
