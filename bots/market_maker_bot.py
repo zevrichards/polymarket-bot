@@ -211,11 +211,15 @@ def tick(cfg: dict, ws_book: LiveOrderBook, state: MMState, tracked: list, mid_h
             continue
         event_key = market.end_date.isoformat()
 
+        price_range = bot_cfg.get("entry_price_range", [0.05, 0.95])
         for outcome, token_id in zip(market.outcomes, market.token_ids):
             live_bid, live_ask = ws_book.best_bid_ask(token_id)
             if live_bid is None or live_ask is None:
                 continue
             mid = (live_bid + live_ask) / 2
+
+            if not (price_range[0] <= mid <= price_range[1]):
+                continue
 
             hist = mid_history.setdefault(token_id, [])
             hist.append(mid)
