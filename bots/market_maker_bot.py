@@ -114,7 +114,11 @@ def select_tracked_markets(cfg: dict, max_count: int) -> list:
     Narrowing scope to a handful of markets (rather than every BTC market
     Gamma returns) is what makes real-time, tight-tick-loop quoting
     actually feasible -- see module docstring."""
-    btc_markets = markets_module.fetch_btc_markets()
+    # horizon_hours: only query as far out as max_seconds_to_resolution + 2min
+    # buffer -- querying 4h out (the default) floods Gamma with pages of
+    # non-BTC markets and triggered a 403 rate-limit in practice.
+    horizon_h = (cfg["max_seconds_to_resolution"] + 120) / 3600
+    btc_markets = markets_module.fetch_btc_markets(horizon_hours=horizon_h)
     candidates = [
         m for m in btc_markets
         if m.seconds_to_resolution() is not None

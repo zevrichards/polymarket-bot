@@ -73,7 +73,11 @@ def select_tracked_markets(cfg: dict) -> list:
     """Unlike market_maker_bot, this isn't narrowed to a tiny handful --
     the strategy benefits from scanning broadly for rare disagreements
     across many markets, not from concentrating on one or two."""
-    btc_markets = markets.fetch_btc_markets()
+    # horizon_hours: only query as far out as max_seconds_to_resolution + 2min
+    # buffer -- querying 4h out (the default) floods Gamma with pages of
+    # non-BTC markets and triggered a 403 rate-limit in practice.
+    horizon_h = (cfg["max_seconds_to_resolution"] + 120) / 3600
+    btc_markets = markets.fetch_btc_markets(horizon_hours=horizon_h)
     return [
         m for m in btc_markets
         if m.seconds_to_resolution() is not None
