@@ -164,35 +164,43 @@ def check_fill(
     event_inventory_elsewhere: float,
     max_inventory: float = float("inf"),
 ) -> dict | None:
-    """If the live market crossed our computed quote, simulate the fill.
-    SELL fills (reducing inventory) are never blocked -- exiting risk is
-    always allowed. BUY fills are blocked once the correlated-event
-    inventory cap OR the per-market max_inventory cap is reached.
+    """Check whether THIS tick's live prices have crossed the quotes we
+    POSTED LAST TICK (stored in pos.last_bid / pos.last_ask).
 
-    max_inventory is checked explicitly here, not just relied on via
-    compute_quotes' inventory clamping -- caught live (Session 14 smoke
-    test): when volatility spikes (e.g. a contract price frozen near a
-    $0/$1 boundary, where the old log-return sigma estimator blew up),
-    the AS pricing formula can degrade to a near-mid fallback quote that
-    keeps getting filled every tick, with nothing in the pricing math
-    itself reliably stopping it. A real bot needs a hard cap that doesn't
-    depend on the pricing model behaving -- this is that cap.
+    The original version checked the freshly-computed quote against the
+    same live prices used to compute it -- which is mathematically
+    impossible to fill: our_bid = mid - spread/2 = (live_bid+live_ask)/2
+    - spread/2, so live_ask <= our_bid requires live_ask <= live_bid,
+    which never holds. Real market making posts resting orders and waits
+    for the market to move to them; simulating that requires comparing
+    LAST tick's quotes to THIS tick's prices.
+
+    SELL fills are never blocked -- exiting inventory is always allowed.
+    BUY fills are blocked by the per-market and per-event inventory caps.
+    max_inventory is also checked here as a hard cap independent of the
+    pricing model (see Session 14: AS formula can degrade on edge cases).
     """
-    if pos.inventory > 0 and live_bid >= our_ask:
+    posted_bid = pos.last_bid  # what we quoted last tick
+    posted_ask = pos.last_ask
+
+    if posted_bid == 0.0 and posted_ask == 0.0:
+        return None  # no quote posted yet (first tick for this position)
+
+    if pos.inventory > 0 and live_bid >= posted_ask:
         size = min(quote_size, pos.inventory)
         pos.inventory -= size
-        pos.cash += size * our_ask
-        return {"side": "ask_filled", "price": our_ask, "size": size}
+        pos.cash += size * posted_ask
+        return {"side": "ask_filled", "price": posted_ask, "size": size}
 
-    if live_ask <= our_bid:
+    if live_ask <= posted_bid:
         if pos.inventory >= max_inventory:
             return None
         if event_inventory_elsewhere + pos.inventory >= max_per_event:
             return None
         size = quote_size
         pos.inventory += size
-        pos.cash -= size * our_bid
-        return {"side": "bid_filled", "price": our_bid, "size": size}
+        pos.cash -= size * posted_bid
+        return {"side": "bid_filled", "price": posted_bid, "size": size}
 
     return None
 
@@ -234,15 +242,11 @@ def tick(cfg: dict, ws_book: LiveOrderBook, state: MMState, tracked: list, mid_h
                 pos = Position(market_id=market.market_id, outcome=outcome, event_key=event_key)
                 state.positions[token_id] = pos
 
-            our_bid, our_ask = compute_quotes(
-                mid, pos.inventory, bot_cfg["gamma"], sigma, seconds_left, bot_cfg["k"],
-                min_spread=bot_cfg["min_spread"], max_inventory=bot_cfg["max_inventory"],
-            )
-            pos.last_bid, pos.last_ask = our_bid, our_ask
-
+            # Check fill against LAST tick's posted quotes before overwriting
+            # them -- simulates resting orders that get hit when price moves.
             inv_elsewhere = event_inventory(state, event_key, exclude_token_id=token_id)
             fill = check_fill(
-                pos, live_bid, live_ask, our_bid, our_ask, bot_cfg["quote_size"],
+                pos, live_bid, live_ask, pos.last_bid, pos.last_ask, bot_cfg["quote_size"],
                 bot_cfg.get("max_inventory_per_event", float("inf")), inv_elsewhere,
                 max_inventory=bot_cfg["max_inventory"],
             )
@@ -250,13 +254,20 @@ def tick(cfg: dict, ws_book: LiveOrderBook, state: MMState, tracked: list, mid_h
                 record = journal.log_trade(
                     BOT_NAME, market_slug=market.slug, outcome=outcome, token_id=token_id,
                     inventory_after=pos.inventory, cash_after=pos.cash, sigma=sigma,
-                    our_bid=our_bid, our_ask=our_ask, **fill,
+                    our_bid=pos.last_bid, our_ask=pos.last_ask, **fill,
                 )
                 log.info(
                     "%s/%s: %s @ %.3f size=%.2f (inv=%.2f)",
                     market.slug, outcome, fill["side"], fill["price"], fill["size"], pos.inventory,
                 )
                 events.append(record)
+
+            # Now update quotes for next tick
+            our_bid, our_ask = compute_quotes(
+                mid, pos.inventory, bot_cfg["gamma"], sigma, seconds_left, bot_cfg["k"],
+                min_spread=bot_cfg["min_spread"], max_inventory=bot_cfg["max_inventory"],
+            )
+            pos.last_bid, pos.last_ask = our_bid, our_ask
 
     return events
 
