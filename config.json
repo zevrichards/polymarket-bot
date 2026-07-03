@@ -22,13 +22,14 @@
     "refresh_interval_seconds": 20,
     "tick_interval_seconds": 1,
     "vol_lookback_ticks": 30,
-    "gamma": 0.1,
+    "gamma": 0.5,
     "k": 500.0,
     "min_spread": 0.01,
     "quote_size": 1.0,
     "max_inventory": 10.0,
     "max_inventory_per_event": 10.0,
-    "entry_price_range": [0.05, 0.95]
+    "entry_price_range": [0.05, 0.95],
+    "pre_resolution_exit_seconds": 60
   },
   "lag_bot": {
     "min_seconds_to_resolution": 30,

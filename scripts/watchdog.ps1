@@ -57,6 +57,7 @@ function Start-Bot {
     param([hashtable]$Bot)
     Start-Process -FilePath $PythonExe `
                   -ArgumentList "-u", "-m", $Bot.Module `
+                  -WorkingDirectory $RepoRoot `
                   -RedirectStandardOutput $Bot.Stdout `
                   -RedirectStandardError  $Bot.Stderr `
                   -WindowStyle Hidden

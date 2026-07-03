@@ -220,7 +220,15 @@ def tick(cfg: dict, ws_book: LiveOrderBook, state: MMState, tracked: list, mid_h
         event_key = market.end_date.isoformat()
 
         price_range = bot_cfg.get("entry_price_range", [0.05, 0.95])
+        pre_exit_secs = bot_cfg.get("pre_resolution_exit_seconds", 60)
         for outcome, token_id in zip(market.outcomes, market.token_ids):
+            # Quote only the Up side -- buying both Up and Down simultaneously
+            # on the same market creates a perfectly correlated inventory that
+            # doubles exposure without reducing risk; the AS skew mechanism
+            # relies on inventory being on ONE side at a time.
+            if outcome != "Up":
+                continue
+
             live_bid, live_ask = ws_book.best_bid_ask(token_id)
             if live_bid is None or live_ask is None:
                 continue
@@ -241,6 +249,28 @@ def tick(cfg: dict, ws_book: LiveOrderBook, state: MMState, tracked: list, mid_h
                     continue
                 pos = Position(market_id=market.market_id, outcome=outcome, event_key=event_key)
                 state.positions[token_id] = pos
+
+            # Hard exit: with less than pre_resolution_exit_seconds remaining,
+            # force-sell any held inventory at mid rather than waiting for a
+            # lucky ask fill or holding through a coin-flip resolution.
+            if seconds_left < pre_exit_secs and pos.inventory > 0:
+                payout = pos.inventory * mid
+                pos.cash += payout
+                pnl = pos.cash
+                record = journal.log_trade(
+                    BOT_NAME, kind="pre_resolution_exit", market_id=pos.market_id,
+                    outcome=outcome, token_id=token_id, inventory_sold=pos.inventory,
+                    exit_price=mid, payout=payout, pnl=pnl, seconds_left=seconds_left,
+                )
+                log.info(
+                    "PRE-RESOLUTION EXIT %s/%s: sold %.2f @ %.3f pnl=%+.2f (%ds left)",
+                    market.slug, outcome, pos.inventory, mid, pnl, int(seconds_left),
+                )
+                events.append(record)
+                pos.inventory = 0
+                pos.cash = 0.0
+                del state.positions[token_id]
+                continue
 
             # Check fill against LAST tick's posted quotes before overwriting
             # them -- simulates resting orders that get hit when price moves.

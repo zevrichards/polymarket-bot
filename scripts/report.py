@@ -67,8 +67,6 @@ def report_directional(bot_name: str, state_path: Path) -> None:
     print(f"  closed trades:    {total_closed}  (resolved {len(resolutions)} + stopped-out {len(stop_losses)})")
     if total_closed:
         print(f"  TRUE win rate:    {true_wins} W / {true_losses} L = {true_wins / total_closed:.1%}")
-    if resolutions:
-        print(f"    (resolved-only: {resolved_wins} W / {resolved_losses} L = {resolved_wins / len(resolutions):.1%} -- excludes stop-losses, don't use this as the headline number)")
     if stop_losses:
         print(f"  stop-loss exits:  {len(stop_losses)}  (pnl {'+' if stop_loss_pnl >= 0 else ''}{stop_loss_pnl:.2f})")
     print(f"  realized PnL:     {'+' if total_pnl >= 0 else ''}{total_pnl:.2f}")
