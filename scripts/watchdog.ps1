@@ -64,6 +64,18 @@ function Start-Bot {
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+
+# Self-deduplication: if another watchdog is already running, exit immediately.
+# Without this, manual relaunches or a race at startup create multiple instances
+# that all fire at the same time, each seeing "bot dead" and each launching a
+# copy -- producing the duplicates we saw in practice.
+$selfProcs = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
+    Where-Object { $_.CommandLine -like '*watchdog.ps1*' -and $_.ProcessId -ne $PID }
+if ($selfProcs) {
+    Write-Log "another watchdog already running (PID $($selfProcs[0].ProcessId)) -- exiting"
+    exit 0
+}
+
 Write-Log "watchdog started (interval=${IntervalSeconds}s)"
 Send-Toast "Polymarket Watchdog" "Watchdog started -- monitoring lag_bot and market_maker_bot"
 
