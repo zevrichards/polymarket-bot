@@ -79,6 +79,9 @@ if ($selfProcs) {
 Write-Log "watchdog started (interval=${IntervalSeconds}s)"
 Send-Toast "Polymarket Watchdog" "Watchdog started -- monitoring lag_bot and market_maker_bot"
 
+# Check immediately on startup (don't wait 60s before the first launch).
+$initialCheck = $true
+
 while ($true) {
     foreach ($bot in $Bots) {
         $proc = Get-BotProcess -Module $bot.Module
@@ -86,8 +89,11 @@ while ($true) {
             $ts = Get-Date -Format "HH:mm:ss"
             Write-Log "$($bot.Name) not found -- relaunching"
             Start-Bot -Bot $bot
-            Send-Toast "Polymarket Watchdog" "$($bot.Name) was dead. Relaunched at $ts."
+            if (-not $initialCheck) {
+                Send-Toast "Polymarket Watchdog" "$($bot.Name) was dead. Relaunched at $ts."
+            }
         }
     }
+    $initialCheck = $false
     Start-Sleep -Seconds $IntervalSeconds
 }
