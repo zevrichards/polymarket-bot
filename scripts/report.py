@@ -61,15 +61,24 @@ def report_directional(bot_name: str, state_path: Path) -> None:
     true_losses = resolved_losses + len(stop_losses)
     total_closed = true_wins + true_losses
 
+    starting = 100.0  # defined in config.json, constant for now
+    balance_pnl = (balance - starting) if balance is not None else None
+
     print(f"\n=== {bot_name} ===")
     print(f"  balance:          {'$%.2f' % balance if balance is not None else 'n/a (no state file yet)'}")
+    if balance_pnl is not None:
+        print(f"  balance PnL:      {'+' if balance_pnl >= 0 else ''}{balance_pnl:.2f}  (balance − $100, ground truth)")
     print(f"  entries logged:   {len(entries)}")
     print(f"  closed trades:    {total_closed}  (resolved {len(resolutions)} + stopped-out {len(stop_losses)})")
     if total_closed:
         print(f"  TRUE win rate:    {true_wins} W / {true_losses} L = {true_wins / total_closed:.1%}")
     if stop_losses:
         print(f"  stop-loss exits:  {len(stop_losses)}  (pnl {'+' if stop_loss_pnl >= 0 else ''}{stop_loss_pnl:.2f})")
-    print(f"  realized PnL:     {'+' if total_pnl >= 0 else ''}{total_pnl:.2f}")
+    skew = total_pnl - balance_pnl if balance_pnl is not None else None
+    skew_flag = f"  *** journal skew: {skew:+.2f} (phantom/duplicate records in trades.jsonl)" if skew is not None and abs(skew) > 0.05 else ""
+    print(f"  journal PnL:      {'+' if total_pnl >= 0 else ''}{total_pnl:.2f}{('  ✓' if skew is not None and abs(skew) <= 0.05 else '')}")
+    if skew_flag:
+        print(skew_flag)
     print(f"  open/unresolved:  {len(open_positions)}")
     if open_positions:
         for pos in open_positions[-5:]:
