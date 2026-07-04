@@ -17,12 +17,6 @@ $Bots = @(
         Module = "bots.lag_bot"
         Stdout = "$LogDir\lag_bot_run.log"
         Stderr = "$LogDir\lag_bot_run.err.log"
-    },
-    @{
-        Name   = "market_maker_bot"
-        Module = "bots.market_maker_bot"
-        Stdout = "$LogDir\market_maker_bot_run.log"
-        Stderr = "$LogDir\market_maker_bot_run.err.log"
     }
 )
 
