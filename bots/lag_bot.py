@@ -57,7 +57,9 @@ from core.paper_broker import InsufficientBalance, InsufficientLiquidity, PaperB
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 LAG_BROKER_STATE_PATH = Path(__file__).resolve().parent.parent / "logs" / "lag_paper_state.json"
+LIVE_BROKER_STATE_PATH = Path(__file__).resolve().parent.parent / "logs" / "live_state.json"
 STOPOUT_BLACKLIST_PATH = Path(__file__).resolve().parent.parent / "logs" / "lag_stopout_blacklist.json"
+KILL_SWITCH_PATH = Path(__file__).resolve().parent.parent / "logs" / "KILL_SWITCH"
 BOT_NAME = "lag_bot"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -307,7 +309,13 @@ def tick(
     min_consecutive = bot_cfg.get("min_consecutive_ticks", 1)
     min_edge = bot_cfg["min_edge"]
 
+    kill_switch_active = KILL_SWITCH_PATH.exists()
+    if kill_switch_active:
+        log.warning("KILL SWITCH active -- skipping all new entries (run scripts/unkill.ps1 to resume)")
+
     for market in tracked:
+        if kill_switch_active:
+            break
         if max_daily_trades and trades_today + len(fills) >= max_daily_trades:
             log.info("daily trade cap (%d) reached, skipping remaining candidates", max_daily_trades)
             break
@@ -410,10 +418,15 @@ def _refresh(bot_cfg: dict, ws_book: LiveOrderBook, broker: PaperBroker, subscri
 def run_loop(cfg: dict | None = None) -> None:
     cfg = cfg or load_config()
     bot_cfg = cfg["lag_bot"]
-    if cfg["mode"] != "paper":
-        raise NotImplementedError("live trading is intentionally not implemented yet -- see README")
 
-    broker = PaperBroker(starting_balance=cfg["starting_balance"], state_path=LAG_BROKER_STATE_PATH)
+    if cfg["mode"] == "paper":
+        broker = PaperBroker(starting_balance=cfg["starting_balance"], state_path=LAG_BROKER_STATE_PATH)
+    elif cfg["mode"] == "live":
+        from core.live_broker import LiveBroker
+        broker = LiveBroker(state_path=LIVE_BROKER_STATE_PATH)
+        log.info("LIVE MODE: real orders will be placed on Polymarket")
+    else:
+        raise ValueError(f"unknown mode {cfg['mode']!r} -- must be 'paper' or 'live'")
     ws_book = LiveOrderBook()
     ws_book.start()
     log.info(
@@ -460,10 +473,15 @@ def run_smoke_test(cfg: dict | None = None, duration_seconds: int = 30) -> None:
     loop for a short fixed duration, then exit, instead of one-shot."""
     cfg = cfg or load_config()
     bot_cfg = cfg["lag_bot"]
-    if cfg["mode"] != "paper":
-        raise NotImplementedError("live trading is intentionally not implemented yet -- see README")
 
-    broker = PaperBroker(starting_balance=cfg["starting_balance"], state_path=LAG_BROKER_STATE_PATH)
+    if cfg["mode"] == "paper":
+        broker = PaperBroker(starting_balance=cfg["starting_balance"], state_path=LAG_BROKER_STATE_PATH)
+    elif cfg["mode"] == "live":
+        from core.live_broker import LiveBroker
+        broker = LiveBroker(state_path=LIVE_BROKER_STATE_PATH)
+        log.info("LIVE MODE smoke test: real orders could be placed")
+    else:
+        raise ValueError(f"unknown mode {cfg['mode']!r}")
     ws_book = LiveOrderBook()
     ws_book.start()
 

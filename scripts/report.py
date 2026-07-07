@@ -150,9 +150,6 @@ def report_market_maker() -> None:
 
 
 def main() -> None:
-    report_directional("directional_bot", DIRECTIONAL_STATE)
-    report_directional("oracle_bot", ORACLE_STATE)
-    report_market_maker()
     report_directional("lag_bot", LAG_STATE)
     report_lag_bot_diagnostics()
     print()

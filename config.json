@@ -1,5 +1,5 @@
 {
-  "mode": "paper",
+  "mode": "live",
   "starting_balance": 100.0,
   "scan_interval_seconds": 60,
   "directional_bot": {
