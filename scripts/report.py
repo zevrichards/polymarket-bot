@@ -20,6 +20,15 @@ DIRECTIONAL_STATE = ROOT / "logs" / "paper_state.json"
 ORACLE_STATE = ROOT / "logs" / "oracle_paper_state.json"
 MM_STATE = ROOT / "logs" / "mm_state.json"
 LAG_STATE = ROOT / "logs" / "lag_paper_state.json"
+LAG_LIVE_STATE = ROOT / "logs" / "live_state.json"
+
+
+def _config() -> dict:
+    cfg_path = ROOT / "config.json"
+    if cfg_path.exists():
+        with cfg_path.open(encoding="utf-8") as f:
+            return json.load(f)
+    return {}
 
 
 def _read_balance(state_path: Path, starting_balance: float = 100.0) -> float | None:
@@ -27,6 +36,19 @@ def _read_balance(state_path: Path, starting_balance: float = 100.0) -> float | 
         return None
     with state_path.open(encoding="utf-8") as f:
         return json.load(f).get("balance")
+
+
+def _live_balance() -> float | None:
+    """Query live CLOB balance. Returns None if credentials are missing."""
+    try:
+        from core.clob_client import get_authenticated_client
+        client = get_authenticated_client()
+        from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
+        result = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+        raw = result.get("balance", 0)
+        return float(raw) / 1e6 if float(raw) > 1000 else float(raw)
+    except Exception:
+        return None
 
 
 def report_directional(bot_name: str, state_path: Path) -> None:
@@ -53,7 +75,15 @@ def report_directional(bot_name: str, state_path: Path) -> None:
     resolution_pnl = sum(r.get("pnl", 0.0) for r in resolutions)
     stop_loss_pnl = sum(s.get("pnl", 0.0) for s in stop_losses)
     total_pnl = resolution_pnl + stop_loss_pnl
-    balance = _read_balance(state_path)
+    cfg = _config()
+    is_live = cfg.get("mode") == "live"
+
+    if is_live:
+        balance = _live_balance()
+        starting = cfg.get("live_starting_balance", 53.77)
+    else:
+        balance = _read_balance(state_path)
+        starting = cfg.get("starting_balance", 100.0)
 
     # True win rate across every closed trade -- a stop-loss exit is never
     # a win, by construction (you only stop out of a position that's down).
@@ -61,13 +91,13 @@ def report_directional(bot_name: str, state_path: Path) -> None:
     true_losses = resolved_losses + len(stop_losses)
     total_closed = true_wins + true_losses
 
-    starting = 100.0  # defined in config.json, constant for now
     balance_pnl = (balance - starting) if balance is not None else None
 
-    print(f"\n=== {bot_name} ===")
-    print(f"  balance:          {'$%.2f' % balance if balance is not None else 'n/a (no state file yet)'}")
+    mode_tag = "LIVE" if is_live else "paper"
+    print(f"\n=== {bot_name} [{mode_tag}] ===")
+    print(f"  balance:          {'$%.2f' % balance if balance is not None else 'n/a'}")
     if balance_pnl is not None:
-        print(f"  balance PnL:      {'+' if balance_pnl >= 0 else ''}{balance_pnl:.2f}  (balance − $100, ground truth)")
+        print(f"  balance PnL:      {'+' if balance_pnl >= 0 else ''}{balance_pnl:.2f}  (vs ${starting:.2f} starting, ground truth)")
     print(f"  entries logged:   {len(entries)}")
     print(f"  closed trades:    {total_closed}  (resolved {len(resolutions)} + stopped-out {len(stop_losses)})")
     if total_closed:

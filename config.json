@@ -1,6 +1,7 @@
 {
   "mode": "live",
   "starting_balance": 100.0,
+  "live_starting_balance": 53.77,
   "scan_interval_seconds": 60,
   "directional_bot": {
     "min_entry_price": 0.85,

@@ -343,3 +343,53 @@ This is a full architecture rewrite, not a parameter tune -- it needs real tradi
 
 ### Status: UNVERIFIED -- this is the critical one to watch
 Verified the full pipeline against live data (`compute_signal` returned sane, well-formed output: `model_p=0.517`, `market_p=0.535`, small edge correctly below threshold, no spurious trade). But the open question from the framing above is exactly what the next real trading sample needs to answer: **does the measured win rate/edge hold up, shrink, or vanish now that market_p is current instead of stale?** Compare directly against the `lag-bot-profitable-2026-06-30` tag's numbers (63.3% true win rate, +$21.32/59 trades) once a comparable sample size accumulates -- don't just look at whether it's still PnL-positive, look at whether the *edge magnitude* (`avg edge taken` in `scripts/report.py`) moved in either direction.
+
+---
+
+## SESSION 16 -- Live trading deployment: Polymarket CLOB V2 migration (2026-07-07)
+
+### Goal
+Switch lag_bot from paper trading to real money on Polymarket's CLOB V2.
+
+### What was built
+- `core/live_broker.py` — LiveBroker class mirroring PaperBroker interface; FOK market orders for entries, `cancel_order(OrderPayload)` for the V2 API, positions persisted to `logs/live_state.json`.
+- `core/clob_client.py` — migrated to `py_clob_client_v2`; `get_authenticated_client()` now uses `signature_type=3` (POLY_1271) and `funder=POLY_DEPOSIT_WALLET`.
+- `scripts/test_live_order.py` — smoke test: places a non-marketable GTC limit order and cancels it. Run before every live launch to verify credentials and deposit wallet are still valid.
+- `scripts/kill.ps1` / `unkill.ps1` — kill switch that blocks new entries without killing the process.
+- `scripts/report.py` — updated to detect live vs paper mode from config.json; in live mode queries the CLOB API for balance (not a state file) and uses `live_starting_balance` ($53.77) as the baseline.
+- `config.json` — `mode` switched to `live`, `live_starting_balance: 53.77` added.
+
+### The V2 migration was not straightforward — full error chain documented here
+
+**Root error:** py-clob-client V1 rejected all orders with "invalid order version, please use the latest clob-client." Polymarket made V2 mandatory on April 28, 2026.
+
+**After installing py-clob-client-v2 (version 1.0.2):**
+
+| sig_type tried | Error | Meaning |
+|---|---|---|
+| 1 (POLY_PROXY) | `maker address not allowed, please use the deposit wallet flow` | V2 no longer accepts the old V1 proxy wallet as maker |
+| 3 (POLY_1271) | `the order signer address has to be the address of the API KEY` | order.signer = wrong proxy address |
+| 0 (EOA, no proxy) | `maker address not allowed, please use the deposit wallet flow` | V2 rejects plain EOA as maker too |
+
+**The unlock:** all three sig_types were tried with the V1 proxy wallet address (`0x3BD8fe...`). The actual V2 deposit wallet is a **different address** (`0xa23d2F995FD9C03AAC2eBefa79795Df2365CA32D`). Found by placing a trade in the Polymarket web UI and reading `order.maker` from the POST `/order` payload in Chrome DevTools Network tab. Once the correct deposit wallet was used as `funder` with `signature_type=3`, the first order was accepted immediately.
+
+### Key lessons
+
+1. **The V2 deposit wallet address differs from the V1 proxy wallet.** They are not the same contract. Do not assume the address shown anywhere in the Polymarket UI as your "wallet" is the correct maker address for API orders — verify by intercepting an actual web UI order.
+
+2. **How to find your deposit wallet:** Polymarket web UI → place any trade → Chrome DevTools → Network → find POST to `clob.polymarket.com/order` → Request payload → read `order.maker`. That address is your deposit wallet.
+
+3. **API keys bind to the EOA, not the deposit wallet — and that is correct.** The CLOB accepts POLY_1271 orders where `order.signer == deposit_wallet` and the API key is registered to the EOA, as long as the deposit wallet is registered in V2. Do not attempt to re-derive API keys against the deposit wallet address — the L1 auth endpoint only supports ECDSA and will reject it.
+
+4. **py-clob-client V1 is permanently dead.** No workaround exists; V2 migration is required for all order placement.
+
+5. **Gemini hallucinated two things during debugging:** (a) a Rust SDK called `rs-clob-client-v2` at `github.com/Polymarket/rs-clob-client-v2` — this repo does not exist; (b) a PyPI package called `kuest-py-clob-client` — also does not exist. Both were presented confidently with code samples. Always verify a repo/package exists before spending time on it.
+
+6. **The real unlock came from DevTools, not any SDK or LLM.** All theoretical approaches (Rust SDK, EIP-1271 header patching, update_balance_allowance, counterfactual contract deployment) failed. The single correct action was intercepting a working web UI order and reading the payload directly.
+
+### Status
+- First live order placed and cancelled successfully.
+- One test order resolved in our favor (+$0.03) before cancel could fire (cancel method bug during debugging).
+- Two test orders lost $0.05 each (expired unfilled while cancel was broken during debugging). Total debugging cost: -$0.10, acceptable.
+- config.json is now `mode: live`. Bot is ready to run with `python -m bots.lag_bot`.
+- `scripts/report.py` now queries the live CLOB balance and reports against `live_starting_balance: $53.77`.
