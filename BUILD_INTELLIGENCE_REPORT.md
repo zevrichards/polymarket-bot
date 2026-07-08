@@ -431,3 +431,75 @@ Expand lag_bot from BTC-only to multi-coin (ETH, SOL, BNB, XRP) and investigate 
 - Multi-coin expansion committed and ready. Bot scans BTC + ETH; SOL/BNB/XRP enabled when liquidity appears.
 - Duplicate process issue deprioritized — PID lock file limits practical impact.
 - 3 commits unpushed to origin/main at session end.
+
+---
+
+## SESSION 18 -- Trade loss analysis + entry filter tightening (2026-07-08)
+
+### Goal
+Diagnose why the bot was consistently stop-lossing or losing money, and apply fixes.
+
+### Bugs found and fixed
+
+**Bug 1 (Critical): SELL takingAmount/makingAmount swapped in `core/live_broker.py`**
+
+In Polymarket V2 CLOB, for a SELL order the semantics are:
+- `takingAmount` = USDC received (you take USDC from the bid)
+- `makingAmount` = shares you give up (you make shares available)
+
+The original code had the comment saying the opposite and assigned them in reverse. Every stop-loss exit recorded `proceeds = original_share_count` (a large number) instead of the actual USDC received (cents). Example: a stop-loss that received $0.77 USDC was logged as pnl=+$1.33. Real pnl was −$1.23. All stop-loss exits were recording large fake profits while losing real money.
+
+Fix: swapped the assignment in `sell()`:
+```python
+raw_proceeds = float(resp.get("takingAmount") or 0)   # USDC received
+raw_sold     = float(resp.get("makingAmount") or position.shares)  # shares given
+```
+
+**Bug 2 (Medium): Stop-loss used bid, not mid, causing immediate triggers**
+
+`loss_frac = (avg_price - bid) / avg_price`. Fill price is near mid/ask. For low-priced tokens (market_p 0.18–0.46) with wide spreads, bid is already 50%+ below fill price the moment you buy → stop-loss fires 19 seconds after entry.
+
+Fix: changed to `mid = (bid + ask) / 2` for the loss_frac comparison.
+
+### Root cause of directional losses
+
+Computed z-score = `log(current/baseline) / (sigma × √T)` for every entry:
+
+| |z| range | model_p | Outcome |
+|---|---|---|---|
+| ≥ 0.75 | ≥ 0.78 | ALL WON |
+| < 0.55 | ≤ 0.69 | ALL STOP-LOSSED |
+
+The model is accurate when price has moved far relative to remaining uncertainty. When |z| is small (entry 164–246s before resolution, small displacement), model_p is 55–70% which is noise around the 50% anchor. The market prices these correctly; the bot was trading noise.
+
+**Entry timing**: every loss entered at 164–246s to resolution. Every win entered under 156s. Waiting until closer to resolution makes the same displacement more decisive.
+
+**Extreme market_p**: the ETH trade at market_p=0.205 (z=−0.07) had a 32% apparent edge, but the model's 52.7% was essentially a coin flip. The market at 20.5% correctly priced that ETH had been UP for most of the 5-minute window; our model only saw the current-vs-baseline snapshot.
+
+### Config changes applied
+
+```json
+"max_seconds_to_resolution": 120,   // was 270
+"min_model_p": 0.75,                // new -- blocks model_p < 0.75
+"entry_price_range": [0.30, 0.70],  // was [0.05, 0.95]
+"coins": ["btc"]                    // reverted from ["btc","eth"]
+```
+
+`min_model_p` is wired into `confirm_and_build_candidate()` in `bots/lag_bot.py` — checked immediately after the edge direction is resolved, before any live book reads.
+
+### Key lessons
+
+1. **SELL takingAmount/makingAmount is opposite to BUY.** For BUY: takingAmount=shares, makingAmount=USDC. For SELL: takingAmount=USDC, makingAmount=shares. The asymmetry is because in maker/taker terms, on a sell you take USDC (from bids) and make shares available. Always verify with a real test sell before trusting accounting.
+
+2. **The z-score is the real signal, not model_p or edge alone.** model_p is just N(z). When |z| < 0.5 the model is saying "55–65% likely" which is not actionable in a market full of informed traders. Gate on model_p ≥ 0.75 (z ≈ 0.67) as a minimum.
+
+3. **Entry timing matters as much as signal strength.** With 240 seconds left, even a 66% model conviction can be undone by a BTC reversal. With 60 seconds left, a 70% model is much harder to beat. The z-score naturally captures this (√T in denominator), but an explicit `max_seconds_to_resolution` cap is a clean second line of defense.
+
+4. **Wide entry_price_range is dangerous.** Tokens at 18–30¢ have proportionally huge bid-ask spreads, thin books, and markets where informed traders have already priced in strong directional information the GBM model can't see (like 4 minutes of accumulated price movement within the window). Restrict to [0.30, 0.70].
+
+5. **Compare BUY vs SELL API responses with a controlled test.** The takingAmount/makingAmount inversion was not caught during Session 16 because the first test sell was masked by other bugs. Add a `scripts/test_live_sell.py` that places a tiny GTC sell and logs the raw response fields before trusting the accounting.
+
+### Status
+- All four fixes committed and pushed.
+- Bot reverted to BTC-only, entry filters tightened.
+- Restart required to pick up config changes.
