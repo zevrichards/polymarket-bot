@@ -195,11 +195,12 @@ class LiveBroker:
         if status not in ("matched", "delayed"):
             raise OrderRejected(f"sell order not filled (status={status!r}): {resp}")
 
-        # V2 SELL: takingAmount = shares we gave up, makingAmount = USDC we received
-        raw_sold     = float(resp.get("takingAmount") or position.shares)
-        raw_proceeds = float(resp.get("makingAmount") or 0)
-        shares_sold = raw_sold     / 1e6 if raw_sold     > 1000 else raw_sold
+        # V2 SELL: takingAmount = USDC we received, makingAmount = shares we gave up.
+        # (Opposite of BUY: as the taker you take USDC, as the maker you provide shares.)
+        raw_proceeds = float(resp.get("takingAmount") or 0)
+        raw_sold     = float(resp.get("makingAmount") or position.shares)
         proceeds    = raw_proceeds / 1e6 if raw_proceeds > 1000 else raw_proceeds
+        shares_sold = raw_sold     / 1e6 if raw_sold     > 1000 else raw_sold
         avg_exit_price = proceeds / shares_sold if shares_sold else 0.0
         cost_basis = position.shares * position.avg_price
         pnl = proceeds - cost_basis

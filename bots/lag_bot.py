@@ -264,10 +264,15 @@ def check_stop_losses(broker: PaperBroker, cfg: dict, ws_book: LiveOrderBook) ->
 
     for token_id, position in list(broker.state.positions.items()):
         bid, ask = ws_book.best_bid_ask(token_id)
-        if bid is None or position.avg_price <= 0:
+        if bid is None or ask is None or position.avg_price <= 0:
             continue
 
-        loss_frac = (position.avg_price - bid) / position.avg_price
+        # Use mid (not bid) so that the bid-ask spread of a low-priced token
+        # doesn't trigger the stop-loss immediately after entry. avg_price is
+        # our fill price (close to mid/ask at buy time) -- comparing it against
+        # bid alone overstates the loss by the full spread width.
+        mid = (bid + ask) / 2
+        loss_frac = (position.avg_price - mid) / position.avg_price
         if loss_frac < stop_loss_pct:
             continue
 
