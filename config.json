@@ -34,6 +34,7 @@
   },
   "lag_bot": {
     "coins": ["btc", "eth"],
+	"other_coins": ["sol", "bnb", "xrp"],
     "min_seconds_to_resolution": 30,
     "max_seconds_to_resolution": 270,
     "min_warmup_seconds": 15,

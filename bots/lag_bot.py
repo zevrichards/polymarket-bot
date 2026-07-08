@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -516,6 +517,31 @@ def run_smoke_test(cfg: dict | None = None, duration_seconds: int = 30) -> None:
     log.info("smoke test complete")
 
 
+def _acquire_lock() -> bool:
+    """Write a PID lock file. Returns False if another instance is already running."""
+    lock_path = CONFIG_PATH.parent / "logs" / "lag_bot.pid"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if lock_path.exists():
+        try:
+            existing_pid = int(lock_path.read_text().strip())
+            import psutil
+            if psutil.pid_exists(existing_pid):
+                log.error("lag_bot already running (PID %d) -- exiting duplicate", existing_pid)
+                return False
+        except Exception:
+            pass  # stale lock or can't check -- proceed
+    lock_path.write_text(str(os.getpid()))
+    return True
+
+
+def _release_lock() -> None:
+    lock_path = CONFIG_PATH.parent / "logs" / "lag_bot.pid"
+    try:
+        lock_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bot 4: cross-exchange lag / probability model")
     parser.add_argument(
@@ -528,7 +554,12 @@ def main() -> None:
         run_smoke_test()
         return
 
-    run_loop()
+    if not _acquire_lock():
+        raise SystemExit(1)
+    try:
+        run_loop()
+    finally:
+        _release_lock()
 
 
 if __name__ == "__main__":

@@ -393,3 +393,41 @@ Switch lag_bot from paper trading to real money on Polymarket's CLOB V2.
 - Two test orders lost $0.05 each (expired unfilled while cancel was broken during debugging). Total debugging cost: -$0.10, acceptable.
 - config.json is now `mode: live`. Bot is ready to run with `python -m bots.lag_bot`.
 - `scripts/report.py` now queries the live CLOB balance and reports against `live_starting_balance: $53.77`.
+
+---
+
+## SESSION 17 -- Multi-coin expansion + duplicate process investigation (2026-07-08)
+
+### Goal
+Expand lag_bot from BTC-only to multi-coin (ETH, SOL, BNB, XRP) and investigate why two lag_bot processes always appeared after every restart.
+
+### What was built
+
+**Multi-coin support (core change):**
+- `core/markets.py` — Added `COIN_CONFIG` dict mapping coin keys → Gamma keywords + Binance symbol. `BtcMarket` dataclass gains a `coin` field and `binance_symbol` property. Added `_detect_coin()`, `_matches_coins()`, and `fetch_crypto_markets(coins=[...])` as the new entry point. `fetch_btc_markets()` now accepts `coins` param and filters accordingly.
+- `core/binance_client.py` — Added `symbol=` param to both `get_price_at()` and `get_recent_prices()`. Default remains `BTCUSDT` for backward compat.
+- `bots/lag_bot.py` — `select_tracked_markets()` reads `coins` from config and calls `fetch_crypto_markets(coins=...)`. `tick()` now receives `recent_prices_by_symbol: dict[str, list[float]]` instead of a flat list. `run_loop()` builds a per-symbol price dict each tick by calling `get_recent_prices(symbol=sym)` for each unique Binance symbol in the tracked market set.
+- `config.json` — `"coins": ["btc", "eth"]` in lag_bot section. SOL/BNB/XRP available via `other_coins` key (not read by bot; thin-book coins are auto-skipped by `min_book_depth_usd: 50`).
+
+**Duplicate process mitigations:**
+- `bots/lag_bot.py` — `_acquire_lock()` / `_release_lock()` write a PID file at `logs/lag_bot.pid` and use `psutil.pid_exists()` to detect a live duplicate. `main()` exits immediately if a live PID is found.
+- `scripts/watchdog.ps1` — `Start-Bot` now uses a write-check-compare pattern (write PID to lock file, sleep 300ms, re-read — if another PID overwrote it, yield to that instance). Also added a `Get-BotProcess` check after the race window.
+
+### Key lessons
+
+1. **ETH 5m up/down markets are liquid.** Verified $77–$200 volume per market and $1600+ bid depth — well above the `min_book_depth_usd: $50` filter. Safe to trade alongside BTC. SOL/BNB/XRP had thin or zero volume but are harmless to include (depth filter skips them automatically).
+
+2. **Per-symbol price fetches, not a shared list.** When trading multiple coins, each must have its own independent Binance price history — a single `recent_prices` list only makes sense for BTC. The refactor builds a `{BTCUSDT: [...], ETHUSDT: [...]}` dict per tick.
+
+3. **Duplicate bot process root cause never identified.** Every lag_bot launch (even direct from terminal, no watchdog) spawns a second `python.exe -m bots.lag_bot` as a child of the first, at the same second, with identical command line. No subprocess/multiprocessing calls exist in our code. Most likely a dependency (websocket-client or py_clob_client_v2 on Windows) does something platform-specific at import time. The PID lock file mitigates the impact but does not prevent the spawn.
+
+4. **`run_loop()` was accidentally called twice in main() after the lock refactor.** The `try/finally` block was added correctly, but the original bare `run_loop()` call below it was left in. Since `run_loop()` is an infinite loop this was unreachable in practice, but it was a real bug. Fixed by removing the redundant call.
+
+5. **Bot reads config once at startup.** `run_loop()` loads config.json at call time and uses those values for the entire session. Changing config.json requires a bot restart to take effect. Hot-reload is not implemented.
+
+6. **Watchdog config is hot-reloadable; bot config is not.** The watchdog's `$Bots` array is defined at script start and doesn't reload either, but the watchdog itself has a 60s poll — effectively immediate compared to the bot's indefinite run duration.
+
+### Status
+- Multi-coin expansion committed and ready. Bot scans BTC + ETH; SOL/BNB/XRP enabled when liquidity appears.
+- Duplicate process issue deprioritized — PID lock file limits practical impact.
+- 3 commits unpushed to origin/main at session end.

@@ -49,6 +49,24 @@ function Get-BotProcess {
 
 function Start-Bot {
     param([hashtable]$Bot)
+    # Lock file prevents two watchdog instances racing to launch the same bot.
+    # We write the lock, sleep briefly, then re-read it -- if our PID is still
+    # in there, we won the race and proceed. If another PID overwrote it, we lost.
+    $lockFile = "$LogDir\$($Bot.Name).launch.lock"
+    [System.IO.File]::WriteAllText($lockFile, "$PID")
+    Start-Sleep -Milliseconds 300
+    $winner = [System.IO.File]::ReadAllText($lockFile).Trim()
+    if ($winner -ne "$PID") {
+        Write-Log "$($Bot.Name) launch won by PID $winner -- skipping"
+        return
+    }
+    # Double-check: bot may have been started by the winner already
+    $already = Get-BotProcess -Module $Bot.Module
+    if ($already) {
+        Write-Log "$($Bot.Name) already running (PID $($already.ProcessId)) -- skipping launch"
+        return
+    }
+    Write-Log "$($Bot.Name) launching (won lock as PID $PID)"
     Start-Process -FilePath $PythonExe `
                   -ArgumentList "-u", "-m", $Bot.Module `
                   -WorkingDirectory $RepoRoot `
