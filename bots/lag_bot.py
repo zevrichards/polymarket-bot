@@ -160,6 +160,7 @@ def confirm_and_build_candidate(market, signal: dict, cfg: dict, ws_book: LiveOr
     decision as fresh as possible rather than acting on a few-ticks-old
     snapshot."""
     min_edge = cfg["min_edge"]
+    min_model_p = cfg.get("min_model_p", 0.0)
     min_price, max_price = cfg["entry_price_range"]
     min_depth = cfg.get("min_book_depth_usd", 0.0)
 
@@ -168,6 +169,9 @@ def confirm_and_build_candidate(market, signal: dict, cfg: dict, ws_book: LiveOr
     elif -signal["up_edge"] >= min_edge:
         token_id, outcome, model_p = signal["down_token"], "Down", 1.0 - signal["model_p_up"]
     else:
+        return None
+
+    if model_p < min_model_p:
         return None
 
     bid, ask = ws_book.best_bid_ask(token_id)
