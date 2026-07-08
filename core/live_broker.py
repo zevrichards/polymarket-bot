@@ -130,10 +130,16 @@ class LiveBroker:
         if status not in ("matched", "delayed"):
             raise OrderRejected(f"buy order not filled (status={status!r}): {resp}")
 
-        # takingAmount = USDC spent; makingAmount = shares received
-        cost = float(resp.get("takingAmount", usd_amount))
-        shares = float(resp.get("makingAmount", 0))
-        avg_price = cost / shares if shares else 0.0
+        # V2: takingAmount = shares received, makingAmount = USDC paid
+        # Both are in 6-decimal micro-units; divide to get human-readable values.
+        raw_shares = float(resp.get("takingAmount") or 0)
+        raw_cost   = float(resp.get("makingAmount") or usd_amount)
+        shares = raw_shares / 1e6 if raw_shares > 1000 else raw_shares
+        cost   = raw_cost   / 1e6 if raw_cost   > 1000 else raw_cost
+        if not shares:
+            shares = usd_amount / 0.5  # fallback: assume mid price
+            cost = usd_amount
+        avg_price = cost / shares
 
         existing = self.state.positions.get(token_id)
         if existing:
@@ -189,9 +195,11 @@ class LiveBroker:
         if status not in ("matched", "delayed"):
             raise OrderRejected(f"sell order not filled (status={status!r}): {resp}")
 
-        # takingAmount = shares taken from us; makingAmount = USDC received
-        shares_sold = float(resp.get("takingAmount", position.shares))
-        proceeds = float(resp.get("makingAmount", 0))
+        # V2 SELL: takingAmount = shares we gave up, makingAmount = USDC we received
+        raw_sold     = float(resp.get("takingAmount") or position.shares)
+        raw_proceeds = float(resp.get("makingAmount") or 0)
+        shares_sold = raw_sold     / 1e6 if raw_sold     > 1000 else raw_sold
+        proceeds    = raw_proceeds / 1e6 if raw_proceeds > 1000 else raw_proceeds
         avg_exit_price = proceeds / shares_sold if shares_sold else 0.0
         cost_basis = position.shares * position.avg_price
         pnl = proceeds - cost_basis

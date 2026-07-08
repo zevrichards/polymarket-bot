@@ -105,7 +105,8 @@ def report_directional(bot_name: str, state_path: Path) -> None:
     if stop_losses:
         print(f"  stop-loss exits:  {len(stop_losses)}  (pnl {'+' if stop_loss_pnl >= 0 else ''}{stop_loss_pnl:.2f})")
     skew = total_pnl - balance_pnl if balance_pnl is not None else None
-    skew_flag = f"  *** journal skew: {skew:+.2f} (phantom/duplicate records in trades.jsonl)" if skew is not None and abs(skew) > 0.05 else ""
+    # Skew is expected while positions are open (USDC left account but no resolution logged yet)
+    skew_flag = f"  *** journal skew: {skew:+.2f} (phantom/duplicate records in trades.jsonl)" if skew is not None and abs(skew) > 0.05 and not open_positions else ""
     print(f"  journal PnL:      {'+' if total_pnl >= 0 else ''}{total_pnl:.2f}{('  ✓' if skew is not None and abs(skew) <= 0.05 else '')}")
     if skew_flag:
         print(skew_flag)

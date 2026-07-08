@@ -1,7 +1,7 @@
 {
   "mode": "live",
   "starting_balance": 100.0,
-  "live_starting_balance": 53.77,
+  "live_starting_balance": 54.67,
   "scan_interval_seconds": 60,
   "directional_bot": {
     "min_entry_price": 0.85,
@@ -33,6 +33,7 @@
     "pre_resolution_exit_seconds": 60
   },
   "lag_bot": {
+    "coins": ["btc", "eth"],
     "min_seconds_to_resolution": 30,
     "max_seconds_to_resolution": 270,
     "min_warmup_seconds": 15,

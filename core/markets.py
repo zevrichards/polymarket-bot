@@ -1,4 +1,4 @@
-"""Discover Bitcoin-resolution markets via Polymarket's public Gamma API.
+"""Discover crypto price-resolution markets via Polymarket's public Gamma API.
 
 The Gamma API (https://gamma-api.polymarket.com) is unauthenticated and is
 the source of market metadata (question, outcomes, clobTokenIds, end date).
@@ -7,19 +7,27 @@ for the token IDs Gamma gives us.
 
 Gamma's /events endpoint doesn't support free-text search, so we pull a page
 of active markets sorted by volume/end-date and filter client-side for
-Bitcoin-price markets (covers slugs like "btc-updown-15m-...", "bitcoin-up-or-down...",
-and plain-English questions mentioning Bitcoin/BTC).
+crypto price markets (covers slugs like "btc-updown-15m-...", "eth-updown-5m-...",
+and plain-English questions mentioning the coin).
 """
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 import requests
 
 GAMMA_HOST = "https://gamma-api.polymarket.com"
-BTC_KEYWORDS = ("bitcoin", "btc")
+
+# Coin -> (Gamma slug/question keywords, Binance symbol)
+COIN_CONFIG: dict[str, dict] = {
+    "btc": {"keywords": ("bitcoin", "btc"), "binance_symbol": "BTCUSDT"},
+    "eth": {"keywords": ("ethereum", "eth"),  "binance_symbol": "ETHUSDT"},
+    "sol": {"keywords": ("solana", "sol"),    "binance_symbol": "SOLUSDT"},
+    "bnb": {"keywords": ("bnb",),             "binance_symbol": "BNBUSDT"},
+    "xrp": {"keywords": ("xrp", "ripple"),   "binance_symbol": "XRPUSDT"},
+}
 
 
 @dataclass
@@ -34,12 +42,26 @@ class BtcMarket:
     closed: bool
     start_date: datetime | None = None  # the window's actual start (eventStartTime),
     # NOT Gamma's "startDate" field (that's listing/creation time, see Session 1 notes)
+    coin: str = "btc"  # which crypto this market resolves against
+
+    @property
+    def binance_symbol(self) -> str:
+        return COIN_CONFIG.get(self.coin, COIN_CONFIG["btc"])["binance_symbol"]
 
     def seconds_to_resolution(self, now: datetime | None = None) -> float | None:
         if self.end_date is None:
             return None
         now = now or datetime.now(timezone.utc)
         return (self.end_date - now).total_seconds()
+
+
+def _detect_coin(question: str, slug: str) -> str:
+    """Detect which coin a market is for based on slug/question keywords."""
+    haystack = f"{question} {slug}".lower()
+    for coin, cfg in COIN_CONFIG.items():
+        if any(kw in haystack for kw in cfg["keywords"]):
+            return coin
+    return "btc"
 
 
 def _parse_market(raw: dict) -> BtcMarket | None:
@@ -68,22 +90,55 @@ def _parse_market(raw: dict) -> BtcMarket | None:
         except ValueError:
             start_date = None
 
+    question = raw.get("question", "")
+    slug = raw.get("slug", "")
     return BtcMarket(
         market_id=str(raw.get("id")),
-        question=raw.get("question", ""),
-        slug=raw.get("slug", ""),
+        question=question,
+        slug=slug,
         end_date=end_date,
         outcomes=outcomes,
         token_ids=token_ids,
         active=bool(raw.get("active")),
         closed=bool(raw.get("closed")),
         start_date=start_date,
+        coin=_detect_coin(question, slug),
     )
 
 
 def _is_btc_market(market: BtcMarket) -> bool:
     haystack = f"{market.question} {market.slug}".lower()
-    return any(keyword in haystack for keyword in BTC_KEYWORDS)
+    return any(keyword in haystack for keyword in COIN_CONFIG["btc"]["keywords"])
+
+
+def _matches_coins(market: BtcMarket, coins: list[str]) -> bool:
+    haystack = f"{market.question} {market.slug}".lower()
+    for coin in coins:
+        cfg = COIN_CONFIG.get(coin)
+        if cfg and any(kw in haystack for kw in cfg["keywords"]):
+            return True
+    return False
+
+
+def fetch_crypto_markets(
+    coins: list[str] | None = None,
+    max_pages: int = 10,
+    page_size: int = 100,
+    only_active: bool = True,
+    horizon_hours: float = 4,
+) -> list[BtcMarket]:
+    """Fetch and filter crypto price-resolution markets for the given coins.
+
+    coins: list of coin keys from COIN_CONFIG (e.g. ["btc", "eth"]).
+           Defaults to ["btc"] for backward compatibility.
+    """
+    return fetch_btc_markets(
+        max_pages=max_pages,
+        page_size=page_size,
+        only_active=only_active,
+        horizon_hours=horizon_hours,
+        coins=coins or ["btc"],
+    )
 
 
 def fetch_btc_markets(
@@ -91,6 +146,7 @@ def fetch_btc_markets(
     page_size: int = 100,
     only_active: bool = True,
     horizon_hours: float = 4,
+    coins: list[str] | None = None,
 ) -> list[BtcMarket]:
     """Fetch and filter Bitcoin-resolution markets, soonest-resolving first.
 
@@ -130,6 +186,7 @@ def fetch_btc_markets(
     horizon = now + timedelta(hours=horizon_hours)
     markets: list[BtcMarket] = []
     found_any = False
+    filter_coins = coins or ["btc"]
 
     for page in range(max_pages):
         params = {
@@ -153,7 +210,7 @@ def fetch_btc_markets(
         page_had_match = False
         for raw in raw_markets:
             market = _parse_market(raw)
-            if not market or not _is_btc_market(market):
+            if not market or not _matches_coins(market, filter_coins):
                 continue
             seconds_left = market.seconds_to_resolution(now)
             if seconds_left is not None and seconds_left > 0:

@@ -79,9 +79,10 @@ def select_tracked_markets(cfg: dict) -> list:
     # buffer -- querying 4h out (the default) floods Gamma with pages of
     # non-BTC markets and triggered a 403 rate-limit in practice.
     horizon_h = (cfg["max_seconds_to_resolution"] + 120) / 3600
-    btc_markets = markets.fetch_btc_markets(horizon_hours=horizon_h)
+    coins = cfg.get("coins", ["btc"])
+    found = markets.fetch_crypto_markets(coins=coins, horizon_hours=horizon_h)
     return [
-        m for m in btc_markets
+        m for m in found
         if m.seconds_to_resolution() is not None
         and cfg["min_seconds_to_resolution"] <= m.seconds_to_resolution() <= cfg["max_seconds_to_resolution"]
     ]
@@ -103,12 +104,14 @@ def compute_signal(market, recent_prices: list[float], cfg: dict, ws_book: LiveO
     if seconds_since_start < cfg["min_warmup_seconds"]:
         return None  # need at least a little realized price action to measure
 
-    baseline_price = binance_client.get_price_at(int(market.start_date.timestamp() * 1000))
+    symbol = market.binance_symbol
+    baseline_price = binance_client.get_price_at(int(market.start_date.timestamp() * 1000), symbol=symbol)
     if baseline_price is None:
         return None
 
     if not recent_prices:
         return None
+    # recent_prices is keyed to this market's coin symbol
     current_price = recent_prices[-1]
     sigma = probability.estimate_volatility_per_second(recent_prices)
     if sigma <= 0:
@@ -298,7 +301,7 @@ def tick(
     ws_book: LiveOrderBook,
     broker: PaperBroker,
     tracked: list,
-    recent_prices: list[float],
+    recent_prices_by_symbol: dict[str, list[float]],
     edge_history: dict,
 ) -> list[dict]:
     bot_cfg = cfg["lag_bot"]
@@ -326,6 +329,7 @@ def tick(
         if market.end_date and broker.has_open_position_for_event(market.end_date.isoformat()):
             continue
 
+        recent_prices = recent_prices_by_symbol.get(market.binance_symbol, [])
         signal = compute_signal(market, recent_prices, bot_cfg, ws_book)
         if signal is None:
             continue
@@ -447,8 +451,12 @@ def run_loop(cfg: dict | None = None) -> None:
                     tracked, subscribed = _refresh(bot_cfg, ws_book, broker, subscribed)
                     last_refresh = now
 
-                recent_prices = binance_client.get_recent_prices(bot_cfg["vol_lookback_seconds"])
-                tick(cfg, ws_book, broker, tracked, recent_prices, edge_history)
+                symbols = {m.binance_symbol for m in tracked}
+                recent_prices_by_symbol = {
+                    sym: binance_client.get_recent_prices(bot_cfg["vol_lookback_seconds"], symbol=sym)
+                    for sym in symbols
+                }
+                tick(cfg, ws_book, broker, tracked, recent_prices_by_symbol, edge_history)
             except KeyboardInterrupt:
                 raise
             except Exception:
@@ -492,12 +500,16 @@ def run_smoke_test(cfg: dict | None = None, duration_seconds: int = 30) -> None:
     start = time.time()
     while time.time() - start < duration_seconds:
         try:
-            recent_prices = binance_client.get_recent_prices(bot_cfg["vol_lookback_seconds"])
+            symbols = {m.binance_symbol for m in tracked}
+            recent_prices_by_symbol = {
+                sym: binance_client.get_recent_prices(bot_cfg["vol_lookback_seconds"], symbol=sym)
+                for sym in symbols
+            }
         except Exception as exc:
             log.warning("Binance price fetch failed: %s", exc)
             time.sleep(bot_cfg["tick_interval_seconds"])
             continue
-        tick(cfg, ws_book, broker, tracked, recent_prices, edge_history)
+        tick(cfg, ws_book, broker, tracked, recent_prices_by_symbol, edge_history)
         time.sleep(bot_cfg["tick_interval_seconds"])
 
     ws_book.stop()

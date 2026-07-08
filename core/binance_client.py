@@ -19,16 +19,15 @@ from __future__ import annotations
 import requests
 
 BINANCE_HOST = "https://api.binance.com"
-SYMBOL = "BTCUSDT"
+DEFAULT_SYMBOL = "BTCUSDT"
 
 
-def get_price_at(timestamp_ms: int) -> float | None:
-    """Returns BTC/USDT's close price for the 1-second kline starting at
-    or just after the given timestamp. None if Binance has no data there
-    (e.g. timestamp is in the future)."""
+def get_price_at(timestamp_ms: int, symbol: str = DEFAULT_SYMBOL) -> float | None:
+    """Returns the close price for the 1-second kline starting at or just
+    after the given timestamp. None if Binance has no data (future timestamp)."""
     resp = requests.get(
         f"{BINANCE_HOST}/api/v3/klines",
-        params={"symbol": SYMBOL, "interval": "1s", "startTime": timestamp_ms, "limit": 1},
+        params={"symbol": symbol, "interval": "1s", "startTime": timestamp_ms, "limit": 1},
         timeout=10,
     )
     resp.raise_for_status()
@@ -38,12 +37,12 @@ def get_price_at(timestamp_ms: int) -> float | None:
     return float(klines[0][4])  # close price
 
 
-def get_recent_prices(lookback_seconds: int = 120) -> list[float]:
+def get_recent_prices(lookback_seconds: int = 120, symbol: str = DEFAULT_SYMBOL) -> list[float]:
     """Returns the last `lookback_seconds` worth of 1-second close prices,
     oldest first. Used to estimate recent realized volatility."""
     resp = requests.get(
         f"{BINANCE_HOST}/api/v3/klines",
-        params={"symbol": SYMBOL, "interval": "1s", "limit": lookback_seconds},
+        params={"symbol": symbol, "interval": "1s", "limit": lookback_seconds},
         timeout=10,
     )
     resp.raise_for_status()
