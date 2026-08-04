@@ -34,8 +34,8 @@
   },
   "lag_bot": {
     "coins": ["btc"],
-    "min_seconds_to_resolution": 30,
-    "max_seconds_to_resolution": 120,
+    "min_seconds_to_resolution": 5,
+    "max_seconds_to_resolution": 30,
     "min_warmup_seconds": 15,
     "vol_lookback_seconds": 120,
     "min_edge": 0.05,
@@ -47,8 +47,8 @@
     "stop_loss_pct": 0.5,
     "max_daily_trades": null,
     "min_book_depth_usd": 50.0,
-    "refresh_interval_seconds": 20,
-    "tick_interval_seconds": 3,
+    "refresh_interval_seconds": 5,
+    "tick_interval_seconds": 1,
     "min_consecutive_ticks": 1
   }
 }

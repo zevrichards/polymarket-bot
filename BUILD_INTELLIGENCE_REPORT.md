@@ -503,3 +503,56 @@ The model is accurate when price has moved far relative to remaining uncertainty
 - All four fixes committed and pushed.
 - Bot reverted to BTC-only, entry filters tightened.
 - Restart required to pick up config changes.
+
+---
+
+## SESSION 19 -- Strategy rethink: final-window-only entries (2026-08-04)
+
+### Goal
+Analyze post-filter trade results and reconsider the fundamental strategy thesis.
+
+### Trade analysis (15 post-filter trades, Jul 21 – Aug 2)
+
+9W / 3L / 3 stops. Net recorded PnL: +$1.34. Actual balance change: +$0.40 (gap = fees + simultaneous balance fetch timing). Starting balance ~$48.73.
+
+z-score vs outcome showed no clean separation in this dataset — both wins and losses occurred across the z-score range. High model_p trades (0.99+) lost just as readily as moderate ones.
+
+### The key strategic insight
+
+The original thesis: Polymarket's book price lags behind real BTC moves because traders price off Chainlink (which updates every 10–30s). We exploit that lag.
+
+**Problem identified:** if Chainlink has already updated to reflect the BTC move, there is no lag to exploit. The market participants see the same Chainlink price we do. A market_p well below model_p in that scenario means the market is *correctly* pricing reversion risk — not missing information. Our GBM model has no reversion term, so it consistently overstates certainty on high-displacement, long-horizon entries.
+
+**The resolution:** the genuine lag play only exists in the **final 10–30 seconds** before resolution. At that point:
+- Reversion risk is mathematically negligible (sigma × √20 ≈ $8–15 for BTC — tiny relative to a $30+ displacement)
+- Whatever Chainlink shows next IS the resolution price — the outcome is essentially locked in
+- If market_p is still showing a stale/moderate price, that is a real mispricing, not the market wisely pricing reversion
+
+This also resolves the "bog down the bot" concern: with max_seconds_to_resolution=30, `tracked` is empty almost all the time (markets only enter the window for ~25 seconds every 5 minutes). A 1-second tick is cheaper than the previous 3-second tick with max=120, because no Binance fetch fires when tracked is empty.
+
+### Config changes applied
+
+```json
+"min_seconds_to_resolution": 5,    // was 30
+"max_seconds_to_resolution": 30,   // was 120
+"tick_interval_seconds": 1,        // was 3
+"refresh_interval_seconds": 5,     // was 20
+```
+
+`min_model_p: 0.75` and `entry_price_range: [0.30, 0.70]` retained — at 20 seconds left any meaningful displacement naturally meets min_model_p anyway.
+
+### Key lessons
+
+1. **The lag thesis only holds in the final window.** Entering at 60–240 seconds gives enough time for BTC to revert. At 10–30 seconds the outcome is mathematically nearly locked in and reversion can't meaningfully change it. This is the only window where our information (Binance spot price) is genuinely ahead of what the resolution oracle will confirm.
+
+2. **Large model_p vs market_p disagreement is a warning, not an opportunity, at longer horizons.** When market_p is 42% and model_p is 99%, the market knows about the BTC move too — they're discounting for reversion. At 20 seconds left, that same disagreement IS an exploitable edge because there's no time left to revert.
+
+3. **Narrow entry windows make 1-second ticks cheaper, not more expensive.** Binance fetches only fire when tracked markets exist in the window. With max=30s, the bot is idle for ~97% of each 5-minute market cycle.
+
+4. **Refresh interval must be shorter than the entry window.** With a 30-second window, a 20-second refresh could miss most of it. Changed to 5 seconds so a market entering the window is discovered within 5 seconds of doing so.
+
+5. **Aug 2 degenerate sigma case.** sigma=9.6e-8 (essentially zero) drove model_p to 1.0 via a z-score of 59. This is a GBM edge case, not a real signal. A minimum sigma filter (e.g. sigma < 1e-5 → skip) should be added to guard against flat-price lookback periods.
+
+### Status
+- Config updated and pushed. Bot restart required.
+- Aug 2 sigma edge case not yet filtered in code — worth adding next session.
