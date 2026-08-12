@@ -176,7 +176,6 @@ def confirm_and_build_candidate(market, signal: dict, cfg: dict, ws_book: LiveOr
     snapshot."""
     min_edge = cfg["min_edge"]
     min_model_p = cfg.get("min_model_p", 0.0)
-    min_price, max_price = cfg["entry_price_range"]
     min_depth = cfg.get("min_book_depth_usd", 0.0)
 
     if signal["up_edge"] >= min_edge:
@@ -195,9 +194,6 @@ def confirm_and_build_candidate(market, signal: dict, cfg: dict, ws_book: LiveOr
         log.debug("CANDIDATE_REJECT %s: ws_book not ready", outcome)
         return None
     market_p = (bid + ask) / 2
-    if not (min_price <= market_p <= max_price):
-        log.debug("CANDIDATE_REJECT %s: market_p=%.3f outside [%.2f, %.2f]", outcome, market_p, min_price, max_price)
-        return None
 
     depth = ws_book.depth_usd(token_id)
     if depth is None or depth < min_depth:
