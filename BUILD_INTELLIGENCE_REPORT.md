@@ -556,3 +556,61 @@ This also resolves the "bog down the bot" concern: with max_seconds_to_resolutio
 ### Status
 - Config updated and pushed. Bot restart required.
 - Aug 2 sigma edge case not yet filtered in code — worth adding next session.
+
+---
+
+## SESSION 20 -- Why no trades after 8 days; min_model_p diagnosis (2026-08-12)
+
+### Goal
+Diagnose zero trades over 8+ days since deploying the final-window config (max_seconds=30, min=5, tick=1s, refresh=5s).
+
+### Root cause: min_model_p=0.75 blocking all genuine edge trades
+
+Added DEBUG-level logging to `compute_signal` and `confirm_and_build_candidate` to show exact computed values every tick. The first market to enter the 30-second window (`btc-updown-5m-1786563000`) revealed:
+
+```
+t=26.4s: model_p=0.433, market_p=0.165, edge=+0.268 → REJECT (model_p=0.433 < min_model_p=0.750)
+t=23.3s: model_p=0.429, market_p=0.125, edge=+0.304 → REJECT
+t=18.5s: model_p=0.417, market_p=0.105, edge=+0.312 → REJECT
+t=10.7s: model_p=0.891, market_p=0.935, edge=-0.044 → no edge (market caught up)
+t=7.7s:  model_p=0.927, market_p=0.975, edge=-0.048 → no edge
+```
+
+**UP won this market.** The opportunity was in ticks 1–3 (edge 0.268–0.312), but min_model_p=0.750 rejected them because model was only 43% confident on UP (despite strong market mispricing at 10–16.5%). By the time model_p reached 0.891, the market had repriced to 0.935 — no exploitable edge remained.
+
+### Why min_model_p=0.75 is wrong for edge trading
+
+`min_model_p=0.75` requires the chosen outcome to have > 75% model probability. But positive-EV trading requires:
+- market_p < model_p by at least min_edge (0.05)
+- model_p > 0 (some plausible probability)
+
+Buying UP at 16.5¢ when model says UP=43% is strongly positive-EV:
+  EV = 0.43 × $1 - $0.165 = $0.265 per dollar risked
+
+The min_edge filter already prevents noise trades (e.g., model=0.51 vs market=0.45, edge=0.06 — those pass). min_model_p was an additional, unjustified constraint that filtered out high-edge, moderate-confidence bets.
+
+The Session 19 reasoning "at 20 seconds left any meaningful displacement naturally meets min_model_p" was wrong. With sigma=1.87e-5/s (observed), the denominator sigma×√T = 1.87e-5 × √26 = 9.5e-5. A $1 BTC displacement on a $63,380 baseline = log_displacement = 1.58e-5 → z = 0.166 → model_p = 0.566. You'd need a $4.27 move (z=0.674) for model_p=0.75 with this sigma. BTC was only $1 away at the start of the window.
+
+### Additional finding: market vs Chainlink timing
+
+The market repriced dramatically between t=18.5s and t=15.5s even though Binance barely moved ($63379.33 → $63379.80). The market went from 0.105 to 0.725 for UP — a massive swing triggered by what appeared to be a Chainlink oracle update. This confirms:
+- Polymarket liquidity providers watch Chainlink directly, not Binance spot
+- The market reprices IMMEDIATELY on Chainlink updates, before our Binance-based model reflects them
+- Our model can have large edge vs. market_p when Chainlink shows one price but BTC will move to another — but we can't easily tell when that window exists
+
+This doesn't invalidate the strategy: in ticks 1–3 the market was at 10–16.5% for UP and UP ultimately won. Whether this was because the market was wrong about Chainlink or because Chainlink hadn't updated yet is unclear. The edge was real regardless.
+
+### Fixes applied
+
+1. **min_model_p: 0.75 → 0.35** — allow edge trades where chosen outcome has ≥ 35% model probability. Rejects nonsense (model=0.15, market=0.10, edge=0.05) while allowing strong-edge trades like model=0.43, market=0.165.
+
+2. **entry_price_range: [0.30, 0.70] → [0.15, 0.85]** — the original 0.70 cap blocked trades where market_p is 0.72 but model says 0.87 (genuine lag of 15%). The spread concern motivating [0.30, 0.70] was for long-horizon holds (minutes); in the final 30 seconds the position settles immediately and spread is irrelevant.
+
+3. **min_sigma: 5e-6** (new config key) — rejects degenerate near-zero volatility readings where the GBM model breaks down. Added to `compute_signal` alongside the existing `sigma <= 0` guard.
+
+4. **DEBUG logging added** to both `compute_signal` (logs every signal: secs_left, model_p, market_p, edge, sigma, prices) and `confirm_and_build_candidate` (logs which filter rejected the candidate and the exact values). The lag_bot logger is set to DEBUG level; root logger remains INFO so other modules stay quiet.
+
+### Status
+- All changes committed and pushed.
+- Bot restarted with new config and code.
+- Debug logging left in place to observe trades in the new regime.

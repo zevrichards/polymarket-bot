@@ -65,6 +65,7 @@ BOT_NAME = "lag_bot"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(BOT_NAME)
+log.setLevel(logging.DEBUG)
 
 
 def load_config() -> dict:
@@ -95,40 +96,54 @@ def compute_signal(market, recent_prices: list[float], cfg: dict, ws_book: LiveO
     trade -- that's tick()'s job, based on whether this signal persists
     across multiple calls."""
     if market.start_date is None:
+        log.debug("SIGNAL_REJECT %s: no start_date", market.slug)
         return None  # can't compute a baseline without the window's real start time
 
     seconds_left = market.seconds_to_resolution()
     if seconds_left is None:
+        log.debug("SIGNAL_REJECT %s: seconds_to_resolution=None", market.slug)
         return None
 
     seconds_since_start = time.time() - market.start_date.timestamp()
     if seconds_since_start < cfg["min_warmup_seconds"]:
+        log.debug("SIGNAL_REJECT %s: warmup %.1fs < %.1fs", market.slug, seconds_since_start, cfg["min_warmup_seconds"])
         return None  # need at least a little realized price action to measure
 
     symbol = market.binance_symbol
     baseline_price = binance_client.get_price_at(int(market.start_date.timestamp() * 1000), symbol=symbol)
     if baseline_price is None:
+        log.debug("SIGNAL_REJECT %s: baseline_price=None", market.slug)
         return None
 
     if not recent_prices:
+        log.debug("SIGNAL_REJECT %s: no recent_prices", market.slug)
         return None
     # recent_prices is keyed to this market's coin symbol
     current_price = recent_prices[-1]
     sigma = probability.estimate_volatility_per_second(recent_prices)
-    if sigma <= 0:
+    min_sigma = cfg.get("min_sigma", 0.0)
+    if sigma <= 0 or sigma < min_sigma:
+        log.debug("SIGNAL_REJECT %s: sigma=%.2e (min=%.2e)", market.slug, sigma, min_sigma)
         return None
 
     model_p_up = probability.prob_up(baseline_price, current_price, seconds_left, sigma)
 
     if "Up" not in market.outcomes or "Down" not in market.outcomes:
+        log.debug("SIGNAL_REJECT %s: missing Up/Down outcomes", market.slug)
         return None
     up_token = market.token_ids[market.outcomes.index("Up")]
     down_token = market.token_ids[market.outcomes.index("Down")]
 
     up_bid, up_ask = ws_book.best_bid_ask(up_token)
     if up_bid is None or up_ask is None:
+        log.debug("SIGNAL_REJECT %s: ws_book not ready (bid=%s ask=%s)", market.slug, up_bid, up_ask)
         return None
     market_p_up = (up_bid + up_ask) / 2
+    log.debug(
+        "SIGNAL %s: secs_left=%.1f model_p=%.3f market_p=%.3f edge=%+.3f sigma=%.2e base=%.2f cur=%.2f",
+        market.slug, seconds_left, model_p_up, market_p_up, model_p_up - market_p_up,
+        sigma, baseline_price, current_price,
+    )
 
     return {
         "up_token": up_token,
@@ -172,25 +187,31 @@ def confirm_and_build_candidate(market, signal: dict, cfg: dict, ws_book: LiveOr
         return None
 
     if model_p < min_model_p:
+        log.debug("CANDIDATE_REJECT %s: model_p=%.3f < min=%.3f", outcome, model_p, min_model_p)
         return None
 
     bid, ask = ws_book.best_bid_ask(token_id)
     if bid is None or ask is None:
+        log.debug("CANDIDATE_REJECT %s: ws_book not ready", outcome)
         return None
     market_p = (bid + ask) / 2
     if not (min_price <= market_p <= max_price):
+        log.debug("CANDIDATE_REJECT %s: market_p=%.3f outside [%.2f, %.2f]", outcome, market_p, min_price, max_price)
         return None
 
     depth = ws_book.depth_usd(token_id)
     if depth is None or depth < min_depth:
+        log.debug("CANDIDATE_REJECT %s: depth=$%.1f < min=$%.1f", outcome, depth or 0, min_depth)
         return None
 
     book = ws_book.get_book(token_id)
     if book is None:
+        log.debug("CANDIDATE_REJECT %s: book=None", outcome)
         return None
 
     edge = model_p - market_p
     if edge < min_edge:
+        log.debug("CANDIDATE_REJECT %s: edge=%.3f < min=%.3f (price moved since signal)", outcome, edge, min_edge)
         return None  # price moved since confirmation -- don't chase a vanished edge
 
     return {
