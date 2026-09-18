@@ -1,5 +1,5 @@
 {
-  "mode": "live",
+  "mode": "paper",
   "starting_balance": 100.0,
   "live_starting_balance": 54.67,
   "scan_interval_seconds": 60,
@@ -39,8 +39,9 @@
     "min_warmup_seconds": 15,
     "vol_lookback_seconds": 120,
     "min_edge": 0.05,
-    "min_model_p": 0.35,
+    "min_model_p": 0.55,
     "min_sigma": 5e-6,
+    "entry_price_range": [0.10, 0.90],
     "max_bet": 2.0,
     "max_bankroll_fraction": 0.02,
     "kelly_fraction": 0.25,

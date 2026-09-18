@@ -177,6 +177,7 @@ def confirm_and_build_candidate(market, signal: dict, cfg: dict, ws_book: LiveOr
     min_edge = cfg["min_edge"]
     min_model_p = cfg.get("min_model_p", 0.0)
     min_depth = cfg.get("min_book_depth_usd", 0.0)
+    price_range = cfg.get("entry_price_range")  # optional -- omit key to disable
 
     if signal["up_edge"] >= min_edge:
         token_id, outcome, model_p = signal["up_token"], "Up", signal["model_p_up"]
@@ -194,6 +195,9 @@ def confirm_and_build_candidate(market, signal: dict, cfg: dict, ws_book: LiveOr
         log.debug("CANDIDATE_REJECT %s: ws_book not ready", outcome)
         return None
     market_p = (bid + ask) / 2
+    if price_range is not None and not (price_range[0] <= market_p <= price_range[1]):
+        log.debug("CANDIDATE_REJECT %s: market_p=%.3f outside [%.2f, %.2f]", outcome, market_p, price_range[0], price_range[1])
+        return None
 
     depth = ws_book.depth_usd(token_id)
     if depth is None or depth < min_depth:
@@ -339,7 +343,11 @@ def tick(
     min_consecutive = bot_cfg.get("min_consecutive_ticks", 1)
     min_edge = bot_cfg["min_edge"]
 
-    kill_switch_active = KILL_SWITCH_PATH.exists()
+    # Kill switch protects real money only -- it must not block paper-mode
+    # validation runs, or there'd be no way to test a new filter regime
+    # without first clearing the exact safety mechanism meant to prevent
+    # another live loss streak.
+    kill_switch_active = cfg["mode"] == "live" and KILL_SWITCH_PATH.exists()
     if kill_switch_active:
         log.warning("KILL SWITCH active -- skipping all new entries (run scripts/unkill.ps1 to resume)")
 
