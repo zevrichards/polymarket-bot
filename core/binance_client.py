@@ -48,3 +48,22 @@ def get_recent_prices(lookback_seconds: int = 120, symbol: str = DEFAULT_SYMBOL)
     resp.raise_for_status()
     klines = resp.json()
     return [float(k[4]) for k in klines]
+
+
+def get_prices_between(start_ms: int, end_ms: int, symbol: str = DEFAULT_SYMBOL) -> list[float]:
+    """Returns 1-second close prices from start_ms to end_ms, oldest first.
+
+    Used to compute the realized average price over the elapsed portion of
+    a market's window -- these markets resolve on TWAP-over-the-window, not
+    the terminal spot price (see core/probability.py's prob_up_twap and
+    BUILD_INTELLIGENCE_REPORT.md Session 21). A single call comfortably
+    covers any window we track (5m/15m markets are well under the 1000-row
+    cap for 1s klines)."""
+    resp = requests.get(
+        f"{BINANCE_HOST}/api/v3/klines",
+        params={"symbol": symbol, "interval": "1s", "startTime": start_ms, "endTime": end_ms, "limit": 1000},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    klines = resp.json()
+    return [float(k[4]) for k in klines]

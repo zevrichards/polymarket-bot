@@ -41,6 +41,8 @@ BINANCE_HOST = "https://api.binance.com"
 CHECKPOINTS_SECONDS_LEFT = [5, 10, 15, 20, 25, 30]
 VOL_LOOKBACK_SECONDS = 120
 OUT_CSV = Path(__file__).resolve().parent.parent / "logs" / "backtest_lag_edge.csv"
+CACHE_PATH = Path(__file__).resolve().parent.parent / "logs" / "resolved_btc_markets_cache.json"
+CACHE_MAX_AGE_HOURS = 6
 
 
 @dataclass
@@ -129,6 +131,44 @@ def fetch_resolved_btc_markets(target_count: int) -> list[ResolvedMarket]:
             print(f"  scanned {i+1} candidate slugs, found {len(out)} resolved markets so far")
         time.sleep(0.05)
     return out
+
+
+def load_or_fetch_markets(target_count: int) -> list[ResolvedMarket]:
+    """Cache the resolved-market list to disk (short TTL) so multiple
+    backtest scripts run back-to-back against the same underlying markets
+    (apples-to-apples comparisons) without re-paying the several-minute
+    slug-walk cost every time."""
+    if CACHE_PATH.exists():
+        try:
+            cached = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+            fetched_at = datetime.fromisoformat(cached["fetched_at"])
+            age_hours = (datetime.now(timezone.utc) - fetched_at).total_seconds() / 3600
+            if age_hours < CACHE_MAX_AGE_HOURS and len(cached["markets"]) >= target_count:
+                print(f"Using cached market list ({len(cached['markets'])} markets, {age_hours:.1f}h old)")
+                return [
+                    ResolvedMarket(
+                        slug=m["slug"], start=datetime.fromisoformat(m["start"]), end=datetime.fromisoformat(m["end"]),
+                        up_token=m["up_token"], down_token=m["down_token"], up_won=m["up_won"],
+                    )
+                    for m in cached["markets"][:target_count]
+                ]
+        except (json.JSONDecodeError, KeyError, ValueError):
+            pass  # corrupt/stale cache -- just refetch
+
+    print(f"Fetching up to {target_count} resolved BTC up/down markets from Gamma...")
+    markets = fetch_resolved_btc_markets(target_count)
+    print(f"Got {len(markets)} resolved markets with clean binary outcomes.")
+
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CACHE_PATH.write_text(json.dumps({
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "markets": [
+            {"slug": m.slug, "start": m.start.isoformat(), "end": m.end.isoformat(),
+             "up_token": m.up_token, "down_token": m.down_token, "up_won": m.up_won}
+            for m in markets
+        ],
+    }), encoding="utf-8")
+    return markets
 
 
 def fetch_price_history(token_id: str, start: datetime, end: datetime) -> list[tuple[float, float]]:
@@ -223,7 +263,23 @@ def build_dataset(markets: list[ResolvedMarket]) -> list[dict]:
             if sigma <= 0:
                 continue
 
-            model_p_up = probability.prob_up(baseline_price, current_price, secs_left, sigma)
+            # Session 21: resolution is TWAP-over-the-window, not terminal
+            # spot -- use prob_up_twap with the realized average of the
+            # elapsed portion, not prob_up's spot-only comparison.
+            elapsed_seconds = checkpoint_ts - m.start.timestamp()
+            realized_prices = [p for t, p in klines if m.start.timestamp() <= t <= checkpoint_ts]
+            if not realized_prices:
+                continue
+            realized_avg_price = sum(realized_prices) / len(realized_prices)
+
+            model_p_up = probability.prob_up_twap(
+                baseline_price=baseline_price,
+                realized_avg_price=realized_avg_price,
+                current_price=current_price,
+                elapsed_seconds=elapsed_seconds,
+                remaining_seconds=secs_left,
+                sigma_per_second=sigma,
+            )
 
             records.append({
                 "slug": m.slug,
@@ -233,6 +289,7 @@ def build_dataset(markets: list[ResolvedMarket]) -> list[dict]:
                 "sigma": sigma,
                 "baseline_price": baseline_price,
                 "current_price": current_price,
+                "realized_avg_price": realized_avg_price,
                 "up_won": m.up_won,
             })
 
@@ -318,9 +375,7 @@ def calibration_report(records: list[dict]) -> None:
 
 def main():
     target_count = 300
-    print(f"Fetching up to {target_count} resolved BTC up/down markets from Gamma...")
-    markets = fetch_resolved_btc_markets(target_count)
-    print(f"Got {len(markets)} resolved markets with clean binary outcomes.")
+    markets = load_or_fetch_markets(target_count)
 
     if len(markets) < 20:
         print("Too few markets found -- Gamma may not retain closed short-duration "

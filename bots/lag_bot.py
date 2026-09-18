@@ -126,7 +126,27 @@ def compute_signal(market, recent_prices: list[float], cfg: dict, ws_book: LiveO
         log.debug("SIGNAL_REJECT %s: sigma=%.2e (min=%.2e)", market.slug, sigma, min_sigma)
         return None
 
-    model_p_up = probability.prob_up(baseline_price, current_price, seconds_left, sigma)
+    # These markets resolve on TWAP-over-the-window, not the terminal spot
+    # price (BUILD_INTELLIGENCE_REPORT.md Session 21) -- fetch the realized
+    # price path since window start so prob_up_twap can account for the
+    # portion of the window that's already locked in, not just the current
+    # tick's spot reading.
+    window_prices = binance_client.get_prices_between(
+        int(market.start_date.timestamp() * 1000), int(time.time() * 1000), symbol=symbol,
+    )
+    if not window_prices:
+        log.debug("SIGNAL_REJECT %s: no window_prices for realized TWAP", market.slug)
+        return None
+    realized_avg_price = sum(window_prices) / len(window_prices)
+
+    model_p_up = probability.prob_up_twap(
+        baseline_price=baseline_price,
+        realized_avg_price=realized_avg_price,
+        current_price=current_price,
+        elapsed_seconds=seconds_since_start,
+        remaining_seconds=seconds_left,
+        sigma_per_second=sigma,
+    )
 
     if "Up" not in market.outcomes or "Down" not in market.outcomes:
         log.debug("SIGNAL_REJECT %s: missing Up/Down outcomes", market.slug)
@@ -140,9 +160,9 @@ def compute_signal(market, recent_prices: list[float], cfg: dict, ws_book: LiveO
         return None
     market_p_up = (up_bid + up_ask) / 2
     log.debug(
-        "SIGNAL %s: secs_left=%.1f model_p=%.3f market_p=%.3f edge=%+.3f sigma=%.2e base=%.2f cur=%.2f",
+        "SIGNAL %s: secs_left=%.1f model_p=%.3f market_p=%.3f edge=%+.3f sigma=%.2e base=%.2f cur=%.2f realized_avg=%.2f",
         market.slug, seconds_left, model_p_up, market_p_up, model_p_up - market_p_up,
-        sigma, baseline_price, current_price,
+        sigma, baseline_price, current_price, realized_avg_price,
     )
 
     return {
@@ -153,6 +173,7 @@ def compute_signal(market, recent_prices: list[float], cfg: dict, ws_book: LiveO
         "up_edge": model_p_up - market_p_up,
         "baseline_price": baseline_price,
         "current_price": current_price,
+        "realized_avg_price": realized_avg_price,
         "sigma_per_second": sigma,
     }
 

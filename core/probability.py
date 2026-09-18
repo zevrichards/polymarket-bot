@@ -84,3 +84,94 @@ def prob_up(
         sigma_per_second * math.sqrt(seconds_remaining)
     )
     return norm_cdf(z)
+
+
+def prob_up_twap(
+    baseline_price: float,
+    realized_avg_price: float | None,
+    current_price: float,
+    elapsed_seconds: float,
+    remaining_seconds: float,
+    sigma_per_second: float,
+) -> float:
+    """Returns model-estimated P(TWAP over the full window >= baseline_price).
+
+    Session 21 finding: these markets do NOT resolve on the terminal spot
+    price -- Polymarket's own resolution rule is "TWAP of the time range
+    >= price at the beginning of that range." prob_up() answers a different
+    question (will the endpoint be above baseline) than the one that
+    actually settles the market (will the *average* over the whole window
+    be above baseline). This function answers the real one.
+
+    Model: split the window into the REALIZED portion (window start to
+    now -- already observed, so its average is a known constant, not a
+    random variable) and the REMAINING portion (now to window end --
+    unknown, modeled the same driftless way as prob_up: E[future price] =
+    current_price, no drift assumption). The window's final TWAP is the
+    time-weighted blend of the two:
+
+      final_twap = (elapsed/T)*realized_avg + (remaining/T)*future_avg
+
+    E[future_avg] = current_price (martingale property of a driftless walk).
+    Var[future_avg] uses the standard result for the time-average of a
+    Brownian path over duration tau: Var = sigma^2 * tau / 3 -- ONE THIRD
+    the variance of the tau-ahead *endpoint* alone (Var = sigma^2 * tau).
+    Intuitively: an average is anchored by near-term values close to the
+    current level as well as the more-wandered-off far values, so it's a
+    less noisy target than the raw endpoint. This is the same math behind
+    Asian options trading at lower implied vol than vanilla options on the
+    same underlying.
+
+    Deliberate simplification: this works in PRICE space (Normal), not log
+    space (lognormal) like prob_up -- summing/averaging lognormal path
+    segments has no closed form, while summing Normal ones does. For a
+    5-minute BTC window the relative price range is small enough (typically
+    well under 1%) that Normal vs lognormal is a negligible difference, well
+    inside the same "short-horizon simplification" territory as the Ito
+    correction prob_up already omits. sigma_dollar = current_price *
+    sigma_per_second is the standard local linearization from log-vol to
+    dollar-vol at the current price level.
+
+    A useful sanity check this implies: early in the window (elapsed=0),
+    for the same displacement/vol/time, this returns a MORE extreme
+    probability than prob_up would for the same inputs -- not less. The
+    market's own price, if it prices off the real TWAP mechanism, should
+    look more "confident" than prob_up() ever gave it credit for. That
+    matches this session's repeated observation of the market looking
+    smarter than the old model.
+
+    realized_avg_price may be None only when elapsed_seconds == 0 (the very
+    start of the window, where it carries zero weight anyway).
+    """
+    if baseline_price <= 0 or current_price <= 0:
+        raise ValueError("prices must be positive")
+    if elapsed_seconds < 0 or remaining_seconds < 0:
+        raise ValueError("elapsed_seconds and remaining_seconds must be non-negative")
+    total_seconds = elapsed_seconds + remaining_seconds
+    if total_seconds <= 0:
+        raise ValueError("elapsed_seconds + remaining_seconds must be positive")
+    if elapsed_seconds > 0 and realized_avg_price is None:
+        raise ValueError("realized_avg_price is required once elapsed_seconds > 0")
+
+    weight_realized = elapsed_seconds / total_seconds
+    weight_remaining = remaining_seconds / total_seconds
+    expected_final_twap = weight_realized * (realized_avg_price or 0.0) + weight_remaining * current_price
+
+    if remaining_seconds <= 0 or sigma_per_second <= 0:
+        if expected_final_twap > baseline_price:
+            return 1.0
+        if expected_final_twap < baseline_price:
+            return 0.0
+        return 0.5
+
+    sigma_dollar = current_price * sigma_per_second
+    variance = (weight_remaining ** 2) * (sigma_dollar ** 2) * remaining_seconds / 3.0
+    if variance <= 0:
+        if expected_final_twap > baseline_price:
+            return 1.0
+        if expected_final_twap < baseline_price:
+            return 0.0
+        return 0.5
+
+    z = (expected_final_twap - baseline_price) / math.sqrt(variance)
+    return norm_cdf(z)

@@ -201,7 +201,15 @@ def test_confirm_and_build_candidate_none_outside_price_range():
 
 # --- stop-loss (now reads the live WebSocket book instead of REST) ---
 
-def test_check_stop_losses_exits_position_beyond_threshold(tmp_path):
+def test_check_stop_losses_exits_position_beyond_threshold(tmp_path, monkeypatch):
+    from core import journal as journal_module
+
+    # check_stop_losses journals every exit -- without this, the test wrote
+    # a fake "stop_loss_exit" record straight into the real production
+    # logs/trades.jsonl every time the suite ran (caught in Session 21).
+    monkeypatch.setattr(journal_module, "LOG_DIR", tmp_path)
+    monkeypatch.setattr(journal_module, "TRADES_PATH", tmp_path / "trades.jsonl")
+
     broker = PaperBroker(starting_balance=100.0, state_path=tmp_path / "state.json")
     broker.state.positions["t1"] = Position(
         market_id="m1", token_id="t1", outcome="Up", shares=10.0, avg_price=0.50
