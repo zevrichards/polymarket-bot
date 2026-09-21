@@ -139,12 +139,27 @@ def compute_signal(market, recent_prices: list[float], cfg: dict, ws_book: LiveO
         return None
     realized_avg_price = sum(window_prices) / len(window_prices)
 
+    # Re-check freshness right before the call: the fetches above (baseline,
+    # window_prices) each cost real network time, and this market was only
+    # ever tracked because it's within min/max_seconds_to_resolution of a
+    # refresh up to refresh_interval_seconds old -- in the final seconds of
+    # a window that's enough for the window to have actually ended by now.
+    # prob_up_twap validates its inputs strictly (unlike prob_up, which
+    # resolves non-positive remaining time by sign) -- a stale negative
+    # seconds_left here should just mean "too late to trade this", not an
+    # uncaught exception. Hit twice in the field during Session 21's paper
+    # validation before this guard was added.
+    fresh_seconds_left = market.seconds_to_resolution()
+    if fresh_seconds_left is None or fresh_seconds_left <= 0:
+        log.debug("SIGNAL_REJECT %s: window ended before signal could be computed", market.slug)
+        return None
+
     model_p_up = probability.prob_up_twap(
         baseline_price=baseline_price,
         realized_avg_price=realized_avg_price,
         current_price=current_price,
         elapsed_seconds=seconds_since_start,
-        remaining_seconds=seconds_left,
+        remaining_seconds=fresh_seconds_left,
         sigma_per_second=sigma,
     )
 
@@ -161,7 +176,7 @@ def compute_signal(market, recent_prices: list[float], cfg: dict, ws_book: LiveO
     market_p_up = (up_bid + up_ask) / 2
     log.debug(
         "SIGNAL %s: secs_left=%.1f model_p=%.3f market_p=%.3f edge=%+.3f sigma=%.2e base=%.2f cur=%.2f realized_avg=%.2f",
-        market.slug, seconds_left, model_p_up, market_p_up, model_p_up - market_p_up,
+        market.slug, fresh_seconds_left, model_p_up, market_p_up, model_p_up - market_p_up,
         sigma, baseline_price, current_price, realized_avg_price,
     )
 
