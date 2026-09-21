@@ -1,6 +1,10 @@
 # Polymarket bot watchdog -- checks every 60s, relaunches dead bots,
 # sends a Windows toast notification and logs each restart.
 # Run at startup via the Startup folder .bat (same mechanism as the bots themselves).
+#
+# SAFETY: only ever auto-launches when config.json's mode is "paper" (see
+# Test-PaperMode). If mode is "live", it refuses and sends a toast instead
+# of relaunching -- live trading must be started by a human, every time.
 
 param(
     [int]$IntervalSeconds = 60
@@ -11,12 +15,14 @@ $PythonExe = "$RepoRoot\.venv\Scripts\python.exe"
 $LogDir    = "$RepoRoot\logs"
 $WatchLog  = "$LogDir\watchdog.log"
 
+$ConfigPath = "$RepoRoot\config.json"
+
 $Bots = @(
     @{
         Name   = "lag_bot"
         Module = "bots.lag_bot"
-        Stdout = "$LogDir\lag_bot_run.log"
-        Stderr = "$LogDir\lag_bot_run.err.log"
+        Stdout = "$LogDir\lag_bot_PAPER_run.log"
+        Stderr = "$LogDir\lag_bot_PAPER_run.err.log"
     }
 )
 
@@ -37,6 +43,22 @@ function Send-Toast {
         $notifier.Show([Windows.UI.Notifications.ToastNotification]::new($xml))
     } catch {
         # Toast failed (e.g. no desktop session) -- log only, don't crash the watchdog
+    }
+}
+
+function Test-PaperMode {
+    # Session 21 lesson: this watchdog is what silently resurrected LIVE
+    # trading after the user believed they had stopped it (killing the
+    # process alone doesn't stop the watchdog from relaunching it within
+    # 60s). It must never auto-launch anything except paper mode -- live
+    # trading has to be a deliberate, manual action every time, never
+    # something a boot-time script decides on its own.
+    try {
+        $config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+        return $config.mode -eq "paper"
+    } catch {
+        Write-Log "could not read config.json mode ($_) -- refusing to auto-launch as a precaution"
+        return $false
     }
 }
 
@@ -88,8 +110,8 @@ if ($selfProcs) {
     exit 0
 }
 
-Write-Log "watchdog started (interval=${IntervalSeconds}s)"
-Send-Toast "Polymarket Watchdog" "Watchdog started -- monitoring lag_bot and market_maker_bot"
+Write-Log "watchdog started (interval=${IntervalSeconds}s, paper-mode-only auto-launch)"
+Send-Toast "Polymarket Watchdog" "Watchdog started -- monitoring lag_bot (paper mode only)"
 
 # Check immediately on startup (don't wait 60s before the first launch).
 $initialCheck = $true
@@ -98,11 +120,16 @@ while ($true) {
     foreach ($bot in $Bots) {
         $proc = Get-BotProcess -Module $bot.Module
         if (-not $proc) {
-            $ts = Get-Date -Format "HH:mm:ss"
-            Write-Log "$($bot.Name) not found -- relaunching"
-            Start-Bot -Bot $bot
-            if (-not $initialCheck) {
-                Send-Toast "Polymarket Watchdog" "$($bot.Name) was dead. Relaunched at $ts."
+            if (-not (Test-PaperMode)) {
+                Write-Log "$($bot.Name) not found, but config.json mode is not 'paper' -- refusing to auto-launch. Live trading must always be started manually."
+                Send-Toast "Polymarket Watchdog" "$($bot.Name) is down and mode is NOT paper -- NOT auto-launching. Start it manually if this is intended."
+            } else {
+                $ts = Get-Date -Format "HH:mm:ss"
+                Write-Log "$($bot.Name) not found -- relaunching (paper mode)"
+                Start-Bot -Bot $bot
+                if (-not $initialCheck) {
+                    Send-Toast "Polymarket Watchdog" "$($bot.Name) was dead. Relaunched (paper mode) at $ts."
+                }
             }
         }
     }
