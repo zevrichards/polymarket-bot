@@ -1,5 +1,5 @@
 # Remove the kill switch, allowing lag_bot to resume entering new positions.
-# The watchdog will relaunch lag_bot if it isn't running.
+# The watchdog is archived (scripts/archive/) -- start lag_bot manually if it isn't running.
 
 $RepoRoot = Split-Path $PSScriptRoot -Parent
 $KillFile = "$RepoRoot\logs\KILL_SWITCH"
