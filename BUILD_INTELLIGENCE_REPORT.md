@@ -679,3 +679,65 @@ The corrected model's verdict on "current live config" (-$33.73) now agrees with
 - Paper-mode validation (mode="paper", "moderate" filters) restarted with the corrected TWAP-aware code -- it had been running for hours on the old spot-based model before this fix, so it was restarted rather than left to accumulate meaningless results. Zero real trades occurred before the restart (confirmed via trade journal), so nothing was lost.
 - All 119 tests pass, journal write isolated and verified clean.
 - Committed and pushed.
+
+---
+
+## SESSION 22 -- lag_bot paper experiment closed; watchdog retired (2026-11-02)
+
+### Outcome
+The paper-mode validation started in Session 21 (TWAP-aware model, "moderate" filters: min_model_p=0.55, entry_price_range=[0.10,0.90]) was stopped and closed at the user's request on 2026-11-02. Nothing Polymarket-related is running. The live account (about $25.71) was never touched during the experiment.
+
+### Result: 7 paper trades, inconclusive
+Period 2026-09-18 to 2026-11-02. 5 wins, 2 stop-loss exits, +$3.09 on $14.00 staked. Paper balance ended at $118.66, of which $115.57 was pre-existing state from an older paper run, so only the $3.09 is attributable to this experiment.
+
+```
+date     side  paid   result        pnl
+Sep 19   Up    0.96   won          +0.08
+Sep 22   Up    0.88   won          +0.27
+Sep 24   Down  0.86   won          +0.33
+Sep 29   Up    0.29   stopped out  -1.31
+Oct 7    Down  0.45   stopped out  -1.11
+Oct 15   Up    0.39   won          +3.12
+Oct 15   Up    0.54   won          +1.70
+```
+
+No trades after Oct 15, 18 days with the bot running most of the time.
+
+- Average fill was 0.62, so break-even is about a 62% win rate. The observed 5/7 (71%) cannot be distinguished from luck at n=7.
+- Both stop-loss exits were correct: each market resolved against the position, so holding to resolution would have lost the full $2 each (-$4.00 vs -$2.42 actual, a $1.58 saving). Note both exits fired 7-8 seconds after entry, since entries only happen with 5-30s left.
+- model_p was 1.000 on all 7 entries. The model never discriminated between setups; trades fire purely because the market price is below certainty. Inference, not verified: with only seconds left, prob_up_twap's modeled remaining uncertainty is tiny, so any gap between realized average and baseline saturates it, while model error (Binance as a proxy for the Chainlink feed that settles the market, baseline approximated as spot-at-start) is not part of that uncertainty.
+
+### Why it was closed: the experiment could not reach a verdict
+Live trade frequency was about 0.16 per day (7 in 44 days). The Session 21 backtest of the same filters implied about 64 trades per 25 hours of markets (about 61 per day), roughly 400 times more. Reaching even 50 trades would take around ten months. The gap also means the Session 21 backtest's +$14.44 should not be treated as a guide to live performance: the backtest rebuilds market_p from last-traded prices, which appears to overstate how often a tradeable gap exists. The same mismatch was already visible in Session 21 (the old tight config backtested at 17 trades per 25h but produced zero trades live in 8 days). Contributing causes seen in the logs include "ws_book not ready" rejections; the effect of min_book_depth_usd=50 and of tracking only about one market at a time in the 5-30s window was not isolated.
+
+### Operational findings (Sept 18 - Nov 2)
+1. Silent process deaths: with no crash trace, the bot stopped on 2026-09-18 (~15:13) and 2026-09-20 (20:15). Cause never identified. It was not a reboot and not an exception.
+2. Fix applied 2026-09-21: prob_up_twap raised ValueError (caught by the outer retry wrapper, so no crash, but ticks were skipped) when a tracked market's window ended during the network calls inside compute_signal. Added a fresh seconds_to_resolution re-check right before the call (bots/lag_bot.py, commit a2a6075). prob_up_twap itself still validates strictly; the caller is responsible for not passing stale values.
+3. Resilience held: a Gamma 403 and a Binance timeout were both caught and retried without killing the process.
+4. Watchdog re-enabled 2026-09-21 with a hard paper-mode gate (reads config.json mode before every relaunch and refuses unless it is "paper"), then retired on 2026-11-02. In 6 weeks it relaunched the bot 18 times (reboots plus deaths). Every relaunch overwrites lag_bot_PAPER_run.err.log, so that log only ever covers the current run and the trade journal is the only complete record.
+5. Launch race: each launch spawns two lag_bot processes; the duplicate-check lock is only evaluated at startup, and the loser sits idle. Harmless but untidy, never fixed.
+6. The watchdog's Startup .bat opened a permanent visible cmd/Windows Terminal window at every login (it waits on the never-ending hidden PowerShell child; -WindowStyle Hidden only hides PowerShell). Restoring it unchanged on 2026-09-21 left that side effect unflagged.
+
+### PolyNode evaluation (docs.polynode.dev) -- not purchased
+- Its Chainlink channel streams the same 30s/60s TWAP data the market resolution text cites (btc-usd-twap-60s-streams), about one event per second, for BTC/ETH/SOL/BNB/XRP/DOGE/HYPE. This directly targets the proxy-error problem found in Session 21.
+- Historical REST data (1s ticks, 5-minute candles) needs a paid plan; the free tier returns 402. Cheapest paid tier is $50/month (Starter). It cannot be backtested for free.
+- Its "fills delivered 3-5 seconds before on-chain confirmation" claim does not help this bot: LiveOrderBook already reads Polymarket's off-chain CLOB WebSocket (wss://ws-subscriptions-clob.polymarket.com/ws/market), which reflects matches before on-chain settlement. A separate "large trades" whale-alert stream is a speculative leading indicator, untested.
+- If revisited: pay one month, pull historical Chainlink ticks, and re-run scripts/backtest_lag_edge.py against the real settlement reference instead of Binance.
+
+### Closure state
+- Bot and watchdog processes stopped; stale lag_bot.pid and launch lock files removed.
+- Startup entry polymarket_watchdog.bat deleted (byte-identical copy kept). scripts/watchdog.ps1 and the launcher moved to scripts/archive/ with git mv (commit b8b502a). watchdog.ps1 derives the repo root from its own location, so it must be moved back to scripts/ before it can run.
+- scripts/unkill.ps1 comment corrected (it claimed the watchdog would relaunch the bot).
+- config.json left at mode "paper"; logs/KILL_SWITCH left in place (it only blocks live mode).
+- No scheduled task, Run key or Startup item references polymarket or lag_bot.
+
+### Lessons
+1. Set the stopping rule before starting. This experiment had no sample-size target or end date, ran about six weeks unnoticed (the user believed it had ended), and at 0.16 trades per day it could never have answered the question. Estimate the live trade rate first; if it implies months to reach a meaningful n, the experiment is not worth running.
+2. A backtest's trade count is a testable prediction. When live frequency is orders of magnitude lower, the reconstruction is wrong and its PnL should be discounted, not just the count.
+3. A model that outputs the same extreme value on every trade is not filtering anything; check the distribution of model outputs on the trades actually taken.
+4. Anything that auto-restarts a trading process must be visible and must never decide the trading mode. Live trading is a manual start, every time.
+5. Judge an exit rule by what holding would have done, not by the loss it realizes: both stop-losses here booked losses but beat holding.
+
+### Status
+- Experiment closed. Nothing running. Only untested lead: the Chainlink TWAP feed as the backtest and signal reference.
+- Do not restart any live or paper trading without reading Sessions 16-22 first.
